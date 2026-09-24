@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Sarjy Demo (Frontend)</title>
+    <style>
+      body { font-family: system-ui, Arial; padding: 1rem; }
+      #log { white-space: pre-wrap; border: 1px solid #ddd; padding: 1rem; max-height: 60vh; overflow:auto }
+    </style>
+  </head>
+  <body>
+    <h1>Sarjy Demo</h1>
+    <div>
+      <label>User ID: <input id="user" value="demo-user" /></label>
+      <button id="start">Start Session</button>
+      <span id="session">(no session)</span>
+    </div>
+    <div>
+      <input id="msg" placeholder="Say something..." style="width:60%" />
+      <button id="send">Send</button>
+    </div>
+    <div style="margin-top:1rem">
+      <button id="record">Start Recording</button>
+      <span id="recstatus">(idle)</span>
+    </div>
+    <h3>Conversation</h3>
+    <div id="log">(empty)</div>
+
+    <script>
+      const logEl = document.getElementById('log');
+      const sendBtn = document.getElementById('send');
+      sendBtn.onclick = async () => {
+          const user = document.getElementById('user').value;
+          const msg = document.getElementById('msg').value;
+          if(!msg) return;
+          appendLog(`You: ${msg}`);
+          const convId = window.currentConversationId || null;
+          const res = await fetch('/message', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ user_id: user, conversation_id: convId, message: msg })
+          });
+          const j = await res.json();
+          window.currentConversationId = j.conversation_id;
+          document.getElementById('session').textContent = `session: ${j.conversation_id}`;
+          appendLog(`Sarjy: ${j.reply}`);
+          // Attempt server-side TTS, otherwise use browser TTS
+          try{ await playTts(j.reply); }catch(e){ try{ window.speechSynthesis.cancel(); window.speechSynthesis.speak(new SpeechSynthesisUtterance(j.reply)); }catch(e){} }
+          document.getElementById('msg').value = '';
+      };
+
+      document.getElementById('start').onclick = async () => {
+        const user = document.getElementById('user').value;
+        const res = await fetch('/message', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ user_id: user, conversation_id: null, message: 'session_start' })
+        });
+        const j = await res.json();
+        window.currentConversationId = j.conversation_id;
+        document.getElementById('session').textContent = `session: ${j.conversation_id}`;
+        appendLog(`Sarjy: ${j.reply}`);
+        // speak reply (server-side TTS preferred)
+        try{ await playTts(j.reply); }catch(e){ try{ window.speechSynthesis.cancel(); window.speechSynthesis.speak(new SpeechSynthesisUtterance(j.reply)); }catch(e){} }
+        // load history
+        loadHistory(j.conversation_id);
+      };
+
+      async function playTts(text){
+        // call server /tts; if returns audio bytes, play them; otherwise fallback to speechSynthesis
+        const form = new FormData();
+        form.append('text', text);
+        const res = await fetch('/tts', { method: 'POST', body: form });
+        const ct = res.headers.get('content-type') || '';
+        if(ct.startsWith('audio/')){
+          const ab = await res.arrayBuffer();
+          const blob = new Blob([ab], { type: ct });
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          await audio.play();
+          setTimeout(()=> URL.revokeObjectURL(url), 60000);
+        }else{
+          // JSON fallback
+          const j = await res.json();
+          if(j && j.text) {
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(new SpeechSynthesisUtterance(j.text));
+          }
+        }
+      }
+
+      async function loadHistory(convId){
+        const res = await fetch(`/history?conversation_id=${convId}`);
+        const j = await res.json();
+        if(j.items && j.items.length){
+          // clear and re-populate
+          logEl.textContent = '';
+          for(const it of j.items){
+            appendLog(`${it.role}: ${it.content}`);
+          }
+        }
+      }
+
+      function appendLog(s){
+        if(logEl.textContent === '(empty)') logEl.textContent = '';
+        logEl.textContent += s + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      // audio recording
+      let mediaRecorder;
+      let audioChunks = [];
+      const recBtn = document.getElementById('record');
+      const recStatus = document.getElementById('recstatus');
+
+      recBtn.onclick = async () => {
+        if(mediaRecorder && mediaRecorder.state === 'recording'){
+          mediaRecorder.stop();
+          recBtn.textContent = 'Start Recording';
+          recStatus.textContent = '(stopped)';
+          return;
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+        mediaRecorder.onstop = async () => {
+          const blob = new Blob(audioChunks, { type: 'audio/webm' });
+          recStatus.textContent = '(uploading)';
+          const form = new FormData();
+          form.append('user_id', document.getElementById('user').value);
+          form.append('conversation_id', window.currentConversationId || '');
+          form.append('audio', blob, 'audio.webm');
+          const res = await fetch('/stt', { method: 'POST', body: form });
+          const j = await res.json();
+          appendLog(`Sarjy (transcript): ${j.transcript}`);
+          appendLog(`Sarjy: ${j.reply}`);
+          try{ window.speechSynthesis.cancel(); window.speechSynthesis.speak(new SpeechSynthesisUtterance(j.reply)); }catch(e){}
+          recStatus.textContent = '(idle)';
+          window.currentConversationId = j.conversation_id;
+          document.getElementById('session').textContent = `session: ${j.conversation_id}`;
+        };
+        mediaRecorder.start();
+        recBtn.textContent = 'Stop Recording';
+        recStatus.textContent = '(recording)';
+      };
+    </script>
+  </body>
+</html>

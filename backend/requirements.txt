@@ -1,0 +1,6 @@
+fastapi==0.95.2
+uvicorn[standard]==0.21.1
+SQLAlchemy>=2.0.54
+httpx>=0.27
+python-dotenv==1.0.0
+python-multipart==0.0.6

@@ -1,0 +1,19 @@
+version: '3.8'
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - '8000:8000'
+    environment:
+      - DATABASE_URL=sqlite:///./data/data.db
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER}
+      - CALCOM_API_KEY=${CALCOM_API_KEY}
+      - CALCOM_USERNAME=${CALCOM_USERNAME}
+      - CALCOM_EVENT_TYPE_ID=${CALCOM_EVENT_TYPE_ID}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+    volumes:
+      - ./data:/app/data

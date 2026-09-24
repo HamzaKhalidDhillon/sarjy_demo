@@ -1,0 +1,4 @@
+# Optional: only needed if USE_LOCAL_WHISPER=1. Pulls in `av`, which builds from source and
+# needs system libav* dev headers (e.g. `brew install ffmpeg` on macOS) -- kept out of the base
+# requirements.txt so the app installs and runs everywhere without them.
+faster-whisper==0.8.0
