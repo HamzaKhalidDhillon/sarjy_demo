@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from backend.models import Base
 
@@ -20,3 +20,11 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+
+    if engine.dialect.name == "postgresql":
+        # Supabase serves every table in the public schema through its REST API, readable with
+        # the project's anon key unless Row Level Security is on. With RLS on and no policies
+        # that API sees nothing, while our backend (connecting as the table owner) is unaffected.
+        with engine.begin() as conn:
+            for table in Base.metadata.tables:
+                conn.execute(text(f'ALTER TABLE "{table}" ENABLE ROW LEVEL SECURITY'))

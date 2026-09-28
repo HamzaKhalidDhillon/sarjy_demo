@@ -152,9 +152,12 @@ class Agent:
         return await self._check_time(state_machine, requested)
 
     async def _check_time(self, state_machine: ConversationStateMachine, requested: str) -> str:
+        # One call for the requested day plus the week after: measured, a 7-day lookup takes the
+        # same ~0.5s as a 1-day one, so this avoids a second round trip when the day is full.
         date_only = requested.split("T")[0]
+        week_later = (datetime.fromisoformat(date_only) + timedelta(days=7)).strftime("%Y-%m-%d")
         with timed("tool_call:check_availability"):
-            result = await CheckAvailabilityTool().run(start_date=date_only, end_date=date_only)
+            result = await CheckAvailabilityTool().run(start_date=date_only, end_date=week_later)
         if not result.ok:
             return "I couldn't check the calendar just now -- could you try again in a moment?"
 
@@ -164,13 +167,9 @@ class Agent:
             state_machine.transition(BookingState.AWAITING_CONFIRMATION, pending_slot_start=match)
             return f"{templates.pretty_time(match)} is open. Should I go ahead and book it?"
 
-        # That time is taken. Suggest other times the same day, or the week after if the day is full.
-        if not available:
-            week_later = (datetime.fromisoformat(date_only) + timedelta(days=7)).strftime("%Y-%m-%d")
-            with timed("tool_call:check_availability"):
-                result = await CheckAvailabilityTool().run(start_date=date_only, end_date=week_later)
-            available = result.data.get("slots", []) if result.ok else []
-        return templates.slot_taken(requested, available)
+        # That time is taken: suggest other times the same day, or the next open ones after it.
+        same_day = [s for s in available if s.startswith(date_only)]
+        return templates.slot_taken(requested, same_day or available)
 
     async def _handle_confirmation(
         self, db: Session, user_id: str, conversation_id: int,

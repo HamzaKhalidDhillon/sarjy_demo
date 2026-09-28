@@ -55,9 +55,10 @@ key (no OAuth), which kept setup cost low relative to Google Calendar.
 
 **Setup required to actually exercise the booking flow:**
 1. Create a free account at cal.com and generate an API key (Settings -> Security).
-2. Create one Event Type (e.g. a 30-minute meeting) and note its numeric event type id and your
-   Cal.com username.
-3. In `backend/.env`, set `CALCOM_API_KEY`, `CALCOM_USERNAME`, `CALCOM_EVENT_TYPE_ID`.
+2. Make sure the account has a public event type (new accounts come with `30min` and `15min`).
+   The app uses `30min` automatically, or the first public one; `CALCOM_EVENT_TYPE_ID` in
+   `.env` overrides that if you want a specific one.
+3. In `backend/.env`, set `CALCOM_API_KEY`.
 4. Cal.com versions its API per-endpoint via a `cal-api-version` header. The defaults in
    `.env.example` (`CALCOM_API_VERSION_SLOTS`, `CALCOM_API_VERSION_BOOKINGS`) were pulled from
    cal.com/docs at implementation time -- if slot lookups or bookings start failing, check
@@ -88,10 +89,108 @@ This is deliberately a fast deterministic regex extractor, not a second LLM call
 testable, no added latency. This is what makes "what's my favorite color?" actually work across
 sessions; previously `/memory/set`/`/memory/get` existed but nothing called them automatically.
 
+### Booking flow, from the user's side
+
+"Book me a call with your agent" -> Sarjy lists real open times. If the user names a time
+themselves ("tomorrow at 3pm", in the first message or later), Sarjy checks exactly that time:
+if it's open it asks to confirm; if it isn't, it says so and suggests other open times that day,
+or the next open ones after it if the day is full. All times come from Cal.com, never the LLM.
+
+### Sign-in
+
+A deliberately small sign-in: username + password, and the first login with a new username
+creates the account (no separate signup page, no email). The brief wants reviewers to open the
+URL "without special setup", so this is one form, not an onboarding flow. What it buys us: memory
+and bookings are tied to an account nobody else can read, instead of a free-text user id anyone
+could type. See "Data security" below for how it's built.
+
 ### Frontend: intentionally minimal
 
 Effort went into the backend per the deep-dive choice above. The frontend stays the simple static
 page it already was.
+
+## Data security
+
+Sarjy stores personal data (remembered facts about people, conversation history, and the email
+addresses used for bookings), so security was treated as part of the reliability deep dive.
+
+**What's in place**
+- **Passwords** are hashed with PBKDF2-SHA256 (200k iterations, random per-user salt, stdlib only)
+  and compared in constant time. Plaintext passwords are never stored or logged.
+- **Identity comes from the server, not the browser.** Sign-in returns a random 256-bit token;
+  every endpoint looks the user up from that token. The browser never sends a `user_id`, so
+  editing a request can't make you someone else.
+- **Ownership checks**: a conversation can only be continued or read by the user who owns it
+  (`/message`, `/history`; covered by `tests/test_auth.py`).
+- **Cost abuse**: every endpoint that spends provider credits (`/stt`, `/tts`, `/message`,
+  `/gemini_test`) requires sign-in, so an open URL can't be used to drain API keys.
+- **Supabase Row Level Security** is switched on for every table at startup. Supabase serves the
+  `public` schema through its REST API using the anon key; with RLS on and no policies, that API
+  sees nothing, while the backend (connecting as the table owner) is unaffected.
+- **Secrets** live only in environment variables (Render dashboard, `sync: false` in
+  `render.yaml`); `.env` is gitignored.
+- **Transport**: HTTPS is terminated by Render; the Supabase connection is TLS (add
+  `?sslmode=require` to `DATABASE_URL` to enforce it rather than just prefer it).
+- **Input limits and guardrails**: 5 MB audio cap, TTS length cap, and the input guardrails run
+  before any LLM or tool call. A message blocked by the guardrails is never stored as a memory.
+- **No script injection from the model**: the frontend renders every message with
+  `textContent`, never `innerHTML`, which matters because the sign-in token lives in
+  `localStorage`.
+- **Logs** contain request ids, paths and timings only: no message text, tokens or emails.
+
+**What we'd do next**
+- Store tokens hashed and give them an expiry; move them from `localStorage` to an `HttpOnly`,
+  `SameSite` cookie so even an XSS bug couldn't read them.
+- Rate-limit `/login` (brute force) and the LLM endpoints per user.
+- A "forget me" endpoint that deletes a user's memories, messages and bookings (GDPR-style right
+  to erasure), plus a retention window on conversation history.
+- Real signup with email verification and a password policy once this is more than a demo.
+- Lock `ALLOWED_ORIGINS` to the deployed URL (the frontend is same-origin, so CORS isn't needed
+  at all today).
+
+## Latency
+
+Not our deep dive, but measured and designed for. Every request logs `path=... ms=...` and every
+pipeline stage logs `stage=... ms=...` with the same request id (`core/logging.py`), so one voice
+turn can be broken down straight from the Render logs.
+
+**Where the time goes in one voice turn** (it's sequential today):
+1. The browser uploads the whole recording after the user stops, then Whisper transcribes it.
+2. The agent turn: sign-in lookup, conversation/state/memory reads and message writes (roughly
+   8-10 database round trips), then one non-streamed LLM call. Booking turns add Cal.com.
+3. The reply is spoken: the typed-message path makes a second request to `/tts` and waits for the
+   full audio; the voice path uses the browser's built-in speech (instant, lower quality).
+
+**Measured**
+- Cal.com slot lookup: ~530 ms warm, ~1.7 s on the first call of a process (event-type lookup +
+  a new TLS connection).
+- A 7-day slot lookup costs the same as a 1-day one (528 vs 533 ms), so when checking a requested
+  time we fetch that day plus the following week in one call. When the day is full, that saves a
+  second ~0.5 s round trip before suggesting alternatives.
+- Password hashing: ~16 ms, once per sign-in only.
+
+**Deployment choices that matter**
+- Put the Supabase project in the same region as the Render service. With ~10 database round
+  trips per turn, a cross-region hop adds up fast.
+- Render's free tier sleeps after 15 idle minutes; the first request after that takes ~30-50 s.
+  Open the URL once before a demo.
+
+**What we'd do next, by expected impact**
+1. Stream the LLM reply and start TTS on the first sentence, instead of waiting for the full
+   reply and the full audio. This is the biggest win for time-to-first-audio.
+2. Reuse one HTTP client per provider (OpenAI, Cal.com) so calls skip a new TLS handshake each
+   time; today every call opens a fresh connection.
+3. Stream audio to STT while the user is still talking, instead of uploading after they stop.
+4. Cut database round trips per turn (one commit per turn, cache the token lookup), and cache
+   Cal.com slots for a minute within a booking conversation.
+
+## Deployment
+
+One Render web service (Docker, `render.yaml` blueprint) runs the backend, which also serves the
+frontend; `/` redirects to it. Persistence is Supabase Postgres via its Session pooler (Render
+can't reach Supabase's IPv6-only direct connection). SQLite is still the default locally.
+Render's free disk is wiped on every restart, which would have silently broken cross-session
+memory, hence an external database.
 
 ## Architecture
 
@@ -111,17 +210,14 @@ guardrail for every turn.
   fallback chains are reliability enough for a take-home.
 - **OAuth for Cal.com** -- explicitly avoided; API key + one event type was the right amount of
   setup for this scope.
-- **Multi-tenant auth** -- single demo `user_id` string, no login/session security model.
+- **Production-grade auth** -- the sign-in above is deliberately minimal; see "Data security"
+  for what we'd add.
 - **Alembic migrations** -- `Base.metadata.create_all()` is fine for two new tables at this scale.
 - **LLM-based moderation as the primary guardrail** -- deterministic regex/keyword checks are
   the primary layer; an LLM classifier behind a flag would be a reasonable second pass.
 - **Booking reconciliation via a real Cal.com `GET /bookings` lookup** -- ambiguous
   (network-timeout) booking attempts currently stay `pending` and ask the user to retry rather
   than being automatically reconciled against Cal.com's own record.
-- **Actual cloud deployment** -- needs hosting credentials only the account owner has; a
-  reasonable free-tier path is a single Render/Fly.io web service for the backend (which also
-  serves the static frontend at `/frontend`), pointed at a Postgres addon instead of SQLite for
-  anything beyond a demo.
 - **Security note**: `backend/.env.example` previously had a real Gemini API key checked in by
   mistake -- it's been blanked, but that key should be rotated in Google AI Studio since it was
   exposed.
