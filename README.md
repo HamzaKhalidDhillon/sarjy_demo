@@ -1,14 +1,95 @@
-Sarjy Demo (Monorepo)
+# Sarjy
 
-Voice assistant demo for the Sarj take-home (see `instruction.md` for the brief, `GOALS.md` for
-our specific decisions and write-up notes).
+A voice assistant that remembers you across sessions and books real meetings on Cal.com.
+Built for the Sarj take-home (brief in `instruction.md`, decisions and write-up in `GOALS.md`).
+
+**Live demo: https://sarjy-be5n.onrender.com** (sign in with any username and password; the
+first sign-in creates the account). On the free tier the server sleeps when idle, so the very
+first request can take up to a minute.
 
 Services:
-- `backend` — FastAPI (Python), modular by provider/agent/tool (see "Backend structure" below),
-  with SQLite persistence, runtime-selectable LLM providers, cross-session memory, deterministic
-  guardrails, and a Cal.com-backed meeting-booking agent.
-- `frontend` — a single static HTML/JS page (intentionally simple; this project's engineering
-  effort went into the backend, not the UI) that talks to the backend.
+- `backend` -- FastAPI (Python): guardrails, cross-session memory, a Cal.com booking agent, and
+  the speech endpoints. Postgres (Supabase) in production, SQLite locally.
+- `frontend` -- a single static HTML/JS page served by the backend: chat bubbles, step-by-step
+  voice status, replies typed out in time with the audio, and a "what Sarjy remembers" panel.
+
+## How one voice turn works
+
+```mermaid
+flowchart LR
+    A["🎙 Browser records<br/>your voice"] -->|upload| B["OpenAI Whisper<br/>speech → text<br/>~1.5 s"]
+    B --> C{"Guardrails +<br/>memory recall"}
+    C -->|chat| D["gpt-3.5-turbo<br/>text reply<br/>~2 s"]
+    C -->|booking| E["Booking state machine<br/>+ Cal.com<br/>~0.5 s per call"]
+    D --> F["Output guardrail"]
+    E --> F
+    F --> G["OpenAI TTS<br/>text → MP3<br/>~3–6 s"]
+    G --> H["🔊 Browser plays it<br/>and types the text"]
+    F -. "after the reply is sent" .-> M[("Memory extraction<br/>LLM → Postgres")]
+```
+
+Audio is only handled by the two speech models at the edges. Everything in the middle is plain
+text, which is what lets the guardrails, the booking checks and memory work on it reliably.
+
+## Where the time goes
+
+Measured against the live APIs (a few runs each, from a laptop and from the Render deployment):
+
+| Step | Typical time | Share of a voice turn |
+|---|---|---|
+| Upload + Whisper transcription (5–10 s of speech) | 1.4 – 1.8 s | `████░░░░░░░░░░` |
+| LLM reply (`gpt-3.5-turbo`) | 1.8 – 3.5 s | `█████░░░░░░░░░` |
+| Cal.com availability check (booking turns only) | ~0.5 s | `█░░░░░░░░░░░░░` |
+| OpenAI TTS, waiting for the full audio file | 2.6 – 6 s (one outlier at 47 s) | `████████████░░` |
+| **Time until Sarjy starts speaking** | **~6 – 10 s** | |
+
+- **Text-to-speech is the biggest single cost**, because we wait for the whole MP3 before
+  playing anything. Streaming the audio and starting playback on the first sentence is the
+  biggest improvement available (planned; see `GOALS.md`).
+- The steps run one after another. Memory extraction runs *after* the reply is sent, so it
+  adds nothing to the wait.
+- If TTS takes longer than 12 s, the browser's built-in voice takes over, so a stalled request
+  never leaves the user in silence.
+- Every request and every step is logged with its duration and a request id
+  (`stage=llm_chat ms=1495`), so these numbers can be re-measured from the Render logs at any time.
+
+## What a turn costs
+
+Using OpenAI's list prices (September 2026), for a typical voice turn: you speak for ~8 s,
+Sarjy answers in ~40 words (~15 s of audio).
+
+| Step | Model | Price | Per turn |
+|---|---|---|---|
+| Speech → text | `whisper-1` | $0.006 / min | ~$0.0008 |
+| Reply (prompt + memory + last 10 messages) | `gpt-3.5-turbo` | $0.50 / $1.50 per 1M tokens in / out | ~$0.0004 |
+| Memory extraction | `gpt-3.5-turbo` | same | ~$0.0002 |
+| Text → speech | `gpt-4o-mini-tts` | ~$0.015 / min of audio | ~$0.0038 |
+| **Total** | | | **~$0.005 per turn (≈ $0.50 per 100 turns)** |
+
+Voice output is about three-quarters of the cost. Cheaper options that need only a config
+change: `gpt-4o-mini-transcribe` ($0.003/min, half of Whisper) and `gpt-4o-mini` for the replies
+(cheaper per token than `gpt-3.5-turbo`, via `OPENAI_CHAT_MODEL`).
+
+**Why not a single speech-to-speech model (OpenAI Realtime)?**
+
+| | This pipeline | `gpt-realtime` | `gpt-realtime-mini` |
+|---|---|---|---|
+| Cost per turn (early in a conversation) | ~$0.005 | ~$0.02+ | ~$0.007 |
+| Later in a long conversation | stays about the same (history is resent as cheap text) | grows: the whole conversation is re-processed as audio every turn unless cached | grows the same way |
+| Time until it starts speaking | ~6–10 s | well under 1 s | well under 1 s |
+| Guardrails, booking checks, memory | run on plain text between steps | harder: one model hears and speaks directly | same |
+
+Realtime is priced per audio token (about 600 tokens per minute of your speech and 1,200 per
+minute of its own): $32 / $64 per 1M in / out for `gpt-realtime`, $10 / $20 for the mini model.
+So the pipeline is clearly cheaper than the full Realtime model, costs about the same as the mini
+model per turn but stays flat as conversations grow, and, most importantly for our
+guardrails-and-reliability deep dive, keeps every step inspectable. The trade-off is speed.
+
+Prices: [OpenAI pricing](https://developers.openai.com/api/docs/pricing),
+[Realtime cost per minute (Forasoft)](https://www.forasoft.com/blog/article/openai-realtime-api-pricing),
+[gpt-4o-mini-tts per-minute estimate (OpenAI community)](https://community.openai.com/t/understanding-gpt-4o-mini-tts-pricing-input-characters-cost/1151816).
+
+## Running it
 
 Quick start (local development):
 
@@ -93,15 +174,10 @@ pip install -r backend/requirements.txt
 uvicorn backend.main:app --reload --port 8000
 ```
 
-Google Gemini (AI Studio) quick test
-- Paste your Gemini API key into `backend/.env.example` (or your `.env`) as `GEMINI_API_KEY`.
-- Start the backend and call the test endpoint:
-
-```bash
-curl -X POST "http://localhost:8000/gemini_test" -d "prompt=Hello from test"
-```
-
-The endpoint will attempt a small generation using the Generative Language REST API (`text-bison-001`) with the API key supplied as `?key=` and return the provider response. If your account uses a different Gemini/AI Studio endpoint or authentication method, skip this test and provide the correct endpoint or service account flow.
+Google Gemini (optional, not used in the deployment)
+- `llm/gemini_provider.py` still targets Google's old `v1beta2` / `text-bison-001` API, which
+  appears to be retired; it would need updating to the current Gemini API before use.
+  `POST /gemini_test` (requires sign-in) exercises it.
 
 **Audience & Design Notes**
 
