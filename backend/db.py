@@ -5,13 +5,16 @@ from backend.models import Base
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/data.db")
 
-# Ensure directory exists for SQLite
 if DATABASE_URL.startswith("sqlite:///"):
+    # Local dev: make sure the folder exists, and let FastAPI's threads share the connection
     path = DATABASE_URL.replace("sqlite:///", "")
     dirpath = os.path.dirname(path)
     os.makedirs(dirpath, exist_ok=True)
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    # Postgres (Supabase in prod). pre_ping drops connections the pooler has closed while idle
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
