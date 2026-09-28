@@ -194,8 +194,9 @@
           const j = await res.json();
           appendLog(`Sarjy (transcript): ${j.transcript}`);
           appendLog(`Sarjy: ${j.reply}`);
-          try{ window.speechSynthesis.cancel(); window.speechSynthesis.speak(new SpeechSynthesisUtterance(j.reply)); }catch(e){}
           recStatus.textContent = '(idle)';
+          // same voice as typed messages: server TTS first, browser speech only as a fallback
+          try{ await playTts(j.reply); }catch(e){ try{ window.speechSynthesis.cancel(); window.speechSynthesis.speak(new SpeechSynthesisUtterance(j.reply)); }catch(e){} }
           window.currentConversationId = j.conversation_id;
           document.getElementById('session').textContent = `session: ${j.conversation_id}`;
         };

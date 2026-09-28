@@ -158,8 +158,8 @@ turn can be broken down straight from the Render logs.
 1. The browser uploads the whole recording after the user stops, then Whisper transcribes it.
 2. The agent turn: sign-in lookup, conversation/state/memory reads and message writes (roughly
    8-10 database round trips), then one non-streamed LLM call. Booking turns add Cal.com.
-3. The reply is spoken: the typed-message path makes a second request to `/tts` and waits for the
-   full audio; the voice path uses the browser's built-in speech (instant, lower quality).
+3. The reply is spoken: the browser makes a second request to `/tts` and waits for the full
+   audio file before playing it. The browser's built-in speech is only a fallback if that fails.
 
 **Measured** (from a laptop against the live APIs, a few runs each)
 
@@ -170,10 +170,11 @@ turn can be broken down straight from the Render logs.
 | OpenAI TTS (one sentence, full audio) | ~4-6 s, one outlier at 47 s |
 | Cal.com slot lookup | ~0.5 s warm, ~1.7 s first call |
 
-So a typed message with server-side TTS takes roughly 6-8 s to first audio, and TTS alone is more
-than half of it, because we wait for the whole audio file before playing anything. The voice
-path skips this by speaking with the browser's built-in voice (instant, lower quality). The 47 s
-outlier is also why the TTS call needs a tighter timeout with a quick fallback to browser speech.
+So a voice turn takes roughly 8-10 s to first audio (a typed one ~6-8 s), and TTS alone is about
+half of it, because we wait for the whole audio file before playing anything. We chose one
+consistent, good-quality voice over speed for now; the browser's built-in voice would be instant
+but noticeably robotic. The 47 s outlier is also why the TTS call needs a tighter timeout with a
+quick fallback to browser speech.
 
 - Cal.com slot lookup: ~530 ms warm, ~1.7 s on the first call of a process (event-type lookup +
   a new TLS connection).
