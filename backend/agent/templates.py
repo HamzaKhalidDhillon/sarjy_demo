@@ -100,12 +100,56 @@ def ask_for_email() -> str:
     )
 
 
-def only_real_booking(start: str, uid: str, tz: str = "UTC") -> str:
-    """Used when the LLM tried to claim a booking that didn't happen this turn: state the truth."""
+def _list_times(starts: list[str], tz: str) -> str:
+    times = [pretty_time(t, tz) for t in starts]
+    return times[0] if len(times) == 1 else ", ".join(times[:-1]) + " and " + times[-1]
+
+
+def upcoming(bookings: list, tz: str = "UTC") -> str:
+    """The user's real upcoming calls, from our own booking records (BookingAttempt rows)."""
+    if len(bookings) == 1:
+        b = bookings[0]
+        return (
+            f"You have one upcoming call: {pretty_time(b.requested_start, tz)} (reference "
+            f"{b.calcom_booking_uid}). The confirmation email has the video link. I can cancel or move it if you like."
+        )
     return (
-        f"Yes, your call is booked for {pretty_time(start, tz)} (reference {uid}), and the "
-        "confirmation email has the video link. That's the only booking in this chat; say "
-        "'book another call' if you'd like one more."
+        f"You have {len(bookings)} upcoming calls: {_list_times([b.requested_start for b in bookings], tz)}. "
+        "I can cancel or move any of them."
+    )
+
+
+def no_upcoming() -> str:
+    return "You don't have any upcoming calls booked with me. Say 'book a call' if you'd like one."
+
+
+def which_booking(bookings: list, action: str, tz: str = "UTC") -> str:
+    return (
+        f"You have {len(bookings)} upcoming calls: {_list_times([b.requested_start for b in bookings], tz)}. "
+        f"Which one should I {action}?"
+    )
+
+
+def confirm_cancel(start: str, tz: str = "UTC") -> str:
+    return f"Should I cancel your call on {pretty_time(start, tz)}? Everyone invited will get a cancellation email."
+
+
+def cancelled_booking(start: str, tz: str = "UTC") -> str:
+    return f"Done: your call on {pretty_time(start, tz)} is cancelled, and Cal.com has emailed everyone invited."
+
+
+def ask_new_time(start: str, tz: str = "UTC") -> str:
+    return f"Sure. What day and time would you like to move your call on {pretty_time(start, tz)} to?"
+
+
+def confirm_reschedule(old: str, new: str, tz: str = "UTC") -> str:
+    return f"{pretty_time(new, tz)} is open. Should I move your call from {pretty_time(old, tz)} to then?"
+
+
+def rescheduled(new: str, uid: str, tz: str = "UTC") -> str:
+    return (
+        f"Done: your call is now on {pretty_time(new, tz)}. Everyone invited gets the updated "
+        f"invite from Cal.com. New reference: {uid}."
     )
 
 

@@ -48,3 +48,16 @@ async def test_cannot_read_someone_elses_conversation():
         # Bob passing Alice's conversation id just gets a new conversation of his own
         r = await c.post("/message", json={"conversation_id": conv_id, "message": "hi"}, headers=bob)
         assert r.json()["conversation_id"] != conv_id
+
+
+@pytest.mark.asyncio
+async def test_chat_list_shows_only_your_chats_titled_by_first_message():
+    async with _client() as c:
+        alice = await _token(c, f"alice-{uuid.uuid4().hex[:8]}")
+        bob = await _token(c, f"bob-{uuid.uuid4().hex[:8]}")
+        first = (await c.post("/message", json={"message": "what can you do?"}, headers=alice)).json()["conversation_id"]
+        second = (await c.post("/message", json={"message": "book a call"}, headers=alice)).json()["conversation_id"]
+
+        items = (await c.get("/conversations", headers=alice)).json()["items"]
+        assert [(i["id"], i["title"]) for i in items] == [(second, "book a call"), (first, "what can you do?")]
+        assert (await c.get("/conversations", headers=bob)).json()["items"] == []

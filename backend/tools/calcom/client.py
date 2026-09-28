@@ -101,3 +101,16 @@ class CalComClient:
         if response.status_code >= 400:
             raise ToolError(f"Cal.com cancel_booking failed: {response.status_code} {response.text}")
         return response.json().get("data", {})
+
+    async def reschedule_booking(self, uid: str, start: str) -> dict:
+        """Moves the booking; attendees and guests carry over. Returns the new booking (new uid)."""
+        self._ensure_configured()
+        url = f"{self.base_url}/bookings/{uid}/reschedule"
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await request_with_retry(
+                client, "POST", url, json={"start": start}, max_attempts=1,
+                headers=self._headers(settings.calcom_api_version_bookings),
+            )
+        if response.status_code >= 400:
+            raise ToolError(f"Cal.com reschedule_booking failed: {response.status_code} {response.text}")
+        return response.json().get("data", {})

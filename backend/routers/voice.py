@@ -73,7 +73,7 @@ async def stt(
 
     db: Session = SessionLocal()
     try:
-        conv = _get_or_create_conversation(db, user_id, conversation_id)
+        conv = _get_or_create_conversation(db, user_id, conversation_id, transcript)
 
         user_msg = Message(conversation_id=conv.id, role="user", content=transcript)
         db.add(user_msg)

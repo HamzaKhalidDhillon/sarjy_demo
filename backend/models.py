@@ -54,6 +54,7 @@ class ConversationState(Base):
     pending_event_type_id = Column(Integer, nullable=True)
     pending_slot_start = Column(String, nullable=True)
     pending_attendee_email = Column(String, nullable=True)
+    target_booking_id = Column(Integer, nullable=True)  # BookingAttempt being cancelled/rescheduled
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 

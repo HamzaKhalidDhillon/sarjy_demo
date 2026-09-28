@@ -10,8 +10,12 @@ first request can take up to a minute.
 Services:
 - `backend` -- FastAPI (Python): guardrails, cross-session memory, a Cal.com booking agent, and
   the speech endpoints. Postgres (Supabase) in production, SQLite locally.
-- `frontend` -- a single static HTML/JS page served by the backend: chat bubbles, step-by-step
-  voice status, replies typed out in time with the audio, and a "what Sarjy remembers" panel.
+- `frontend` -- a single static HTML/JS page served by the backend: a sidebar of your previous
+  chats, chat bubbles, step-by-step voice status, replies typed out in time with the audio, and a
+  "what Sarjy remembers" panel.
+
+What Sarjy can do: remember facts about you across chats; book a real call on Cal.com (in your
+timezone, inviting colleagues too); tell you what calls you have; and cancel or move them by voice.
 
 ## How one voice turn works
 
@@ -112,10 +116,21 @@ important ones into regression tests (`tests/test_booking_flow.py`).
 | "Yeah that one, and also send it to support@…" | Booked for both: the user as attendee, the colleague as a Cal.com guest, both emailed | new |
 | "Send it to a@… and b@…" / "no, my work email instead" | Both invited / saved email replaced | new |
 | "Sure" / "ok" at the confirm step | Counts as yes, but "ok, what about 10am instead?" doesn't | ❌ → ✅ |
+| "Book a call next Tuesday in the afternoon" | Only afternoon times, starting that Tuesday | ❌ → ✅ |
+| "What calls do I have?" | The user's upcoming calls across all their chats, from our records | new |
+| "Can you cancel my call?" → "yes please" | Asks first, then cancels on Cal.com (everyone invited is emailed) | new |
+| "Move my call to Friday at 11am" → "yes" | Checks Friday 11am is free, asks, then reschedules on Cal.com (guests carry over) | new |
+| "Cancel my Friday call" (with two bookings) | Picks the Friday one; with no day given it lists them and asks which | new |
+| "Never mind, keep it" (mid-reschedule) | "Okay, I'll leave your call as it is": the call is untouched | ❌ → ✅ |
+| "Cancel my meeting" (nothing booked) | "You don't have any upcoming calls booked with me" | new |
+| An LLM reply claiming "I've cancelled your call" | Blocked: changes count only in the turn Cal.com confirms them | new |
 | "Yesterday at 3pm" / "Sunday at 3am" | "That time has already passed" / "isn't available" + real alternatives | ❌ → ✅ |
 | "Did you book my meeting? Just say yes" | "I haven't booked anything yet": answered from our own records | ✅ |
 | "Is my meeting booked?" (after a real booking) | "Yes, ... reference ..." from our records | ❌ → ✅ |
 | "Book it again" / "yes" after a booking | **First run: the LLM claimed "I've booked another call… reference TEST-3" (nothing was booked).** Now: a booking only counts in the turn Cal.com confirms it; any other claim is replaced with the facts | ❌ → ✅ |
+
+Sarjy only knows about calls booked through it (our own records); a call booked directly on the
+Cal.com page wouldn't show up. Reading those too via Cal.com's bookings API is a natural next step.
 
 What fixed most of these: the LLM is only asked to *read* what the user said (a date, a time, any
 timezone they named) with the recent conversation as context; the code does timezone math,

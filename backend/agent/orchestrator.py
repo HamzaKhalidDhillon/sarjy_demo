@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
@@ -22,7 +23,9 @@ from backend.llm.factory import get_llm_provider
 from backend.models import BookingAttempt, Message
 from backend.core.errors import ToolError
 from backend.tools.calcom.client import CalComClient
-from backend.tools.calcom.tools import BookMeetingTool, CheckAvailabilityTool, get_event_type_id
+from backend.tools.calcom.tools import (
+    BookMeetingTool, CancelMeetingTool, CheckAvailabilityTool, RescheduleMeetingTool, get_event_type_id,
+)
 
 _BOOK_INTENT = re.compile(
     r"\b(book|booking|schedule|set up|arrange)\b.{0,30}\b(meeting|call|appointment|chat|demo|sales|agent|team|someone)\b"
@@ -47,6 +50,20 @@ def _is_confirmation(message: str) -> bool:
 _DECLINE_INTENT = re.compile(
     r"\b(no|different time|another time|not that|actually)\b", re.IGNORECASE
 )
+_CANCEL_BOOKING = re.compile(
+    r"\b(cancel|call off|scrap)\b.{0,40}\b(call|meeting|booking|appointment|demo)\b", re.IGNORECASE
+)
+_RESCHEDULE = re.compile(
+    r"\breschedule\b|\b(move|change|push|shift|postpone)\b.{0,40}\b(call|meeting|booking|appointment|demo)\b",
+    re.IGNORECASE,
+)
+_LIST_BOOKINGS = re.compile(
+    r"\b(what|which|any|list|show)\b.{0,30}\b(calls|meetings|bookings|appointments)\b"
+    r"|\bmy (upcoming )?(calls|meetings|bookings)\b|\bwhen is my (call|meeting)\b",
+    re.IGNORECASE,
+)
+_KEEP_IT = re.compile(r"\b(no|keep|don'?t|never mind|nevermind|leave it)\b", re.IGNORECASE)
+
 # "is my meeting booked?" / "did you book it?" -- answered from our own records, not the LLM
 _STATUS_QUESTION = re.compile(
     r"\b(is|was|has) (my|the|our) (meeting|call|booking|appointment)\b.{0,20}\b(booked|scheduled|confirmed|set)\b"
@@ -125,22 +142,25 @@ def _idempotency_key(conversation_id: int, event_type_id: int, start: str) -> st
 
 
 _HHMM = re.compile(r"^(\d{1,2}):(\d{2})")
+_PARTS = {"morning": (0, 12), "afternoon": (12, 17), "evening": (17, 24)}
 
 
-async def _read_requested_time(
-    llm: LLMProvider, message: str, history: list[dict], tz: str
-) -> tuple[str | None, str | None]:
-    """Work out what time the user is asking for. Returns (datetime, date):
-    datetime = 'YYYY-MM-DDTHH:MM' in the user's timezone if they named or picked an exact time,
-    date = 'YYYY-MM-DD' if they only named a day, (None, None) if they didn't ask for a time
-    (usually a question). The LLM sees the recent conversation, so "the first one" or "make it
+class TimeAsk(NamedTuple):
+    exact: str | None = None  # 'YYYY-MM-DDTHH:MM' in the user's timezone
+    day: str | None = None    # 'YYYY-MM-DD' when they only named a day
+    part: str | None = None   # 'morning' / 'afternoon' / 'evening' if they said one
+
+
+async def _read_requested_time(llm: LLMProvider, message: str, history: list[dict], tz: str) -> TimeAsk:
+    """Work out what time the user is asking for: an exact time, just a day, and/or a part of the
+    day ("afternoon"). All empty if they didn't ask for a time (usually a question). The LLM sees the recent conversation, so "the first one" or "make it
     11 instead" resolve against what was just discussed. It only reports what the user said
     (date, time, any timezone they named); timezone conversion is done here in code, because the
     model got that arithmetic wrong in testing. Its output is only used to *look up* real slots
     on Cal.com, never shown or booked as-is."""
     inline = _ISO_DATETIME.search(message)
     if inline:
-        return inline.group(0).replace(" ", "T"), None
+        return TimeAsk(exact=inline.group(0).replace(" ", "T"))
 
     now = datetime.now(ZoneInfo(tz))
     recent = "\n".join(f"{m['role']}: {m['content']}" for m in history[-4:])
@@ -158,7 +178,8 @@ async def _read_requested_time(
                 "offered or proposed times; 'the first one', 'the 5pm one' or 'make it 11 instead' "
                 "refer to those, and a bare time means the day being discussed. Reply with ONLY JSON: "
                 '{"date": "YYYY-MM-DD" or null, "time": "HH:MM" (24-hour) or null, '
-                '"timezone": the timezone the user explicitly named, e.g. "UTC", or null}. '
+                '"timezone": the timezone the user explicitly named, e.g. "UTC", or null, '
+                '"part_of_day": "morning", "afternoon" or "evening" if they said one, or null}. '
                 "Give the time exactly as the user means it, without converting timezones. "
                 "For a vague range like 'next week', give its first day as date. "
                 "Use null for everything when they are not asking for a time.\n\n"
@@ -173,14 +194,15 @@ async def _read_requested_time(
         parsed = json.loads(raw.strip().removeprefix("```json").removesuffix("```"))
     except Exception:
         # Malformed LLM output is treated as "no time found", never trusted as-is.
-        return None, None
+        return TimeAsk()
 
+    part = parsed.get("part_of_day") if parsed.get("part_of_day") in _PARTS else None
     day = parsed.get("date")
     if not (isinstance(day, str) and _ISO_DATE.fullmatch(day)):
-        return None, None
+        return TimeAsk(part=part)
     clock = _HHMM.match(str(parsed.get("time") or ""))
     if not clock:
-        return None, day
+        return TimeAsk(day=day, part=part)
 
     # The user may name a timezone ("10am UTC"); convert to their own timezone here in code.
     # Anything that isn't a real timezone name (e.g. "PKT", echoed from Sarjy's own message)
@@ -191,9 +213,31 @@ async def _read_requested_time(
     try:
         when = datetime.fromisoformat(f"{day}T{int(clock.group(1)):02d}:{clock.group(2)}")
     except ValueError:
-        return None, day
+        return TimeAsk(day=day, part=part)
     local = when.replace(tzinfo=ZoneInfo(source_tz)).astimezone(ZoneInfo(tz))
-    return local.strftime("%Y-%m-%dT%H:%M"), None
+    return TimeAsk(exact=local.strftime("%Y-%m-%dT%H:%M"))
+
+
+def _upcoming_bookings(db: Session, user_id: str) -> list[BookingAttempt]:
+    """The user's confirmed future calls, across all their chats, from our own records."""
+    now = datetime.now(timezone.utc)
+    rows = db.query(BookingAttempt).filter(
+        BookingAttempt.user_id == user_id, BookingAttempt.status == "confirmed"
+    ).all()
+    future = [r for r in rows if templates.to_local(r.requested_start) > now]
+    return sorted(future, key=lambda r: templates.to_local(r.requested_start))
+
+
+def _match_booking(bookings: list[BookingAttempt], ask: TimeAsk, tz: str) -> BookingAttempt | None:
+    """Which of the user's bookings they mean ("my Friday call", "the 11am one")."""
+    if ask.exact:
+        wanted = templates.to_local(ask.exact, tz)
+        hits = [b for b in bookings if templates.to_local(b.requested_start, tz) == wanted]
+    elif ask.day:
+        hits = [b for b in bookings if templates.to_local(b.requested_start, tz).date().isoformat() == ask.day]
+    else:
+        hits = []
+    return hits[0] if len(hits) == 1 else None
 
 
 def _recent_history(db: Session, conversation_id: int, limit: int = 10) -> list[dict]:
@@ -214,8 +258,13 @@ class Agent:
         state_machine = ConversationStateMachine(db, conversation_id)
         tz = _safe_tz(timezone_name)
 
+        changing = state_machine.state in (
+            BookingState.CHOOSE_TO_CANCEL, BookingState.CHOOSE_TO_RESCHEDULE,
+            BookingState.RESCHEDULE_TIME, BookingState.CONFIRM_RESCHEDULE,
+        )
         if state_machine.maybe_cancel(message):
-            return templates.cancelled()
+            # "never mind" while moving a call keeps the call; it only drops the change
+            return "Okay, I'll leave your call as it is." if changing else templates.cancelled()
 
         with timed("guardrail_input"):
             verdict = InputGuardrail.check(message)
@@ -230,11 +279,22 @@ class Agent:
         memory_context = memory.format_memories_for_prompt(memories)
         history = _recent_history(db, conversation_id)
 
-        if _STATUS_QUESTION.search(message):
-            return self._what_is_actually_booked(db, conversation_id, state_machine, tz)
+        if _STATUS_QUESTION.search(message) or _LIST_BOOKINGS.search(message):
+            return self._what_is_actually_booked(db, user_id, state_machine, tz)
+
+        # Let the LLM know about the user's real upcoming calls (for questions like "should I
+        # prepare anything for Friday?"); any claim it makes about them still goes through the
+        # output guardrail below.
+        upcoming = _upcoming_bookings(db, user_id)
+        if upcoming:
+            times = ", ".join(templates.pretty_time(b.requested_start, tz) for b in upcoming)
+            memory_context = f"{memory_context} The user's upcoming calls, from the booking system: {times}.".strip()
 
         state_before = state_machine.state
-        starting = state_before in (BookingState.IDLE, BookingState.BOOKED) and _BOOK_INTENT.search(message)
+        free = state_before in (BookingState.IDLE, BookingState.BOOKED, BookingState.CHANGED)
+        cancelling = free and _CANCEL_BOOKING.search(message)
+        rescheduling = free and not cancelling and _RESCHEDULE.search(message)
+        starting = free and not (cancelling or rescheduling) and _BOOK_INTENT.search(message)
 
         saved_email = _saved_email(memories)
 
@@ -251,6 +311,18 @@ class Agent:
                 "Your booking is already confirmed, and I can't change who it goes to. If you'd like "
                 f"another call with the invite sent to {templates.recipients(emails)}, just say 'book another call'."
             )
+        elif cancelling or rescheduling:
+            action = "cancel" if cancelling else "reschedule"
+            reply = await self._start_change(db, user_id, llm, state_machine, message, history, tz, action)
+        elif state_before in (BookingState.CHOOSE_TO_CANCEL, BookingState.CHOOSE_TO_RESCHEDULE):
+            action = "cancel" if state_before == BookingState.CHOOSE_TO_CANCEL else "reschedule"
+            reply = await self._choose_booking(db, user_id, llm, state_machine, message, history, memory_context, tz, action)
+        elif state_before == BookingState.CONFIRM_CANCEL:
+            reply = await self._confirm_cancel(db, llm, state_machine, message, history, memory_context, tz)
+        elif state_before == BookingState.RESCHEDULE_TIME:
+            reply = await self._reschedule_time(db, llm, state_machine, message, history, memory_context, tz)
+        elif state_before == BookingState.CONFIRM_RESCHEDULE:
+            reply = await self._confirm_reschedule(db, llm, state_machine, message, history, memory_context, tz)
         elif starting:
             reply = await self._start_booking(llm, state_machine, message, history, tz)
         elif state_before == BookingState.COLLECTING_TIME:
@@ -262,34 +334,33 @@ class Agent:
         else:
             reply = await self._chat(llm, memory_context, message, history)
 
-        # A booking only counts as verified in the turn it actually happened. Otherwise the LLM
-        # could repeat an earlier confirmation from the history ("I've booked another call...").
-        booking_verified = state_before != BookingState.BOOKED and state_machine.state == BookingState.BOOKED
+        # A booking/cancel/reschedule only counts as verified in the turn it actually happened.
+        # Otherwise the LLM could repeat an earlier confirmation from the history ("I've booked
+        # another call...").
+        done = (BookingState.BOOKED, BookingState.CHANGED)
+        booking_verified = state_before not in done and state_machine.state in done
         out_verdict = OutputGuardrail.check(reply, booking_verified=booking_verified)
         if not out_verdict.allowed:
             logger.warning("output guardrail rejected a reply (%s), replacing with the facts", out_verdict.reason)
-            reply = self._what_is_actually_booked(db, conversation_id, state_machine, tz)
+            reply = self._what_is_actually_booked(db, user_id, state_machine, tz)
 
         return reply
 
     def _what_is_actually_booked(
-        self, db: Session, conversation_id: int, state_machine: ConversationStateMachine, tz: str
+        self, db: Session, user_id: str, state_machine: ConversationStateMachine, tz: str
     ) -> str:
-        """The truth about bookings in this chat, straight from our own records. Used to answer
-        "is my meeting booked?" and to replace any booking claim the LLM wasn't allowed to make."""
+        """The truth about the user's bookings, straight from our own records. Used to answer
+        "is my meeting booked?" / "what calls do I have?" and to replace any booking claim the LLM
+        wasn't allowed to make."""
         state, pending = state_machine.state, state_machine.row.pending_slot_start
         if pending and state == BookingState.AWAITING_CONTACT:
             return templates.holding(pending, "Just tell me your email address and I'll book it.", tz)
         if pending and state == BookingState.AWAITING_CONFIRMATION:
             return templates.holding(pending, "Say 'yes' and I'll book it.", tz)
 
-        last = (
-            db.query(BookingAttempt)
-            .filter(BookingAttempt.conversation_id == conversation_id, BookingAttempt.status == "confirmed")
-            .order_by(BookingAttempt.id.desc()).first()
-        )
-        if last:
-            return templates.only_real_booking(last.requested_start, last.calcom_booking_uid, tz)
+        upcoming = _upcoming_bookings(db, user_id)
+        if upcoming:
+            return templates.upcoming(upcoming, tz)
         return templates.nothing_booked_yet()
 
     async def _chat(
@@ -317,13 +388,13 @@ class Agent:
         state_machine.transition(BookingState.COLLECTING_TIME, pending_slot_start=None)
 
         # "Book me a call tomorrow at 3pm" / "...on Friday" -- use it straight away
-        requested, day = await _read_requested_time(llm, message, history, tz)
-        if requested:
-            return await self._check_time(state_machine, requested, tz)
-        return await self._offer_times(day, tz)
+        ask = await _read_requested_time(llm, message, history, tz)
+        if ask.exact:
+            return await self._check_time(state_machine, ask.exact, tz)
+        return await self._offer_times(ask.day, tz, ask.part)
 
-    async def _offer_times(self, day: str | None, tz: str) -> str:
-        """Open times from `day` (or today) onward."""
+    async def _offer_times(self, day: str | None, tz: str, part: str | None = None) -> str:
+        """Open times from `day` (or today) onward, only in the `part` of the day if given."""
         today = datetime.now(ZoneInfo(tz)).date()
         asked = datetime.fromisoformat(day).date() if day else today
         start = max(asked, today)
@@ -333,8 +404,15 @@ class Agent:
             )
         if not result.ok:
             return "I'd love to help you book a meeting, but I can't reach the calendar right now. Could you try again in a moment?"
-        offer = templates.slots_offer(result.data.get("slots", []), tz)
-        return f"That day has already passed. {offer}" if asked < today else offer
+        slots = result.data.get("slots", [])
+        note = "That day has already passed. " if asked < today else ""
+        if part:
+            low, high = _PARTS[part]
+            in_part = [s for s in slots if low <= templates.to_local(s, tz).hour < high]
+            if not in_part:
+                note += f"I don't have any {part} times then. "
+            slots = in_part or slots
+        return note + templates.slots_offer(slots, tz)
 
     async def _collect_time(
         self, llm: LLMProvider, state_machine: ConversationStateMachine, message: str,
@@ -349,18 +427,21 @@ class Agent:
         if _CONFIRM_INTENT.search(message) and short:
             return "Which of those times would you like? You can say something like 'the 9:30 one' or 'Thursday at 10'."
 
-        requested, day = await _read_requested_time(llm, message, history, tz)
-        if requested:
-            return await self._check_time(state_machine, requested, tz)
-        if day:
-            return await self._offer_times(day, tz)
+        ask = await _read_requested_time(llm, message, history, tz)
+        if ask.exact:
+            return await self._check_time(state_machine, ask.exact, tz)
+        if ask.day or ask.part:
+            return await self._offer_times(ask.day, tz, ask.part)
         return await self._answer_and_nudge(
             llm, memory_context, message, history,
             "Whenever you're ready, just tell me a day and time for the call, or say 'never mind' to skip it.",
         )
 
-    async def _check_time(self, state_machine: ConversationStateMachine, requested: str, tz: str) -> str:
-        """`requested` is 'YYYY-MM-DDTHH:MM' in the user's timezone."""
+    async def _check_time(
+        self, state_machine: ConversationStateMachine, requested: str, tz: str, moving_from: str | None = None,
+    ) -> str:
+        """`requested` is 'YYYY-MM-DDTHH:MM' in the user's timezone. `moving_from` is the current
+        start of a booking being rescheduled (changes what we ask for confirmation)."""
         wanted = templates.to_local(requested, tz)
         now = datetime.now(ZoneInfo(tz))
         if wanted < now:
@@ -382,6 +463,9 @@ class Agent:
 
         available = result.data.get("slots", [])
         match = next((s for s in available if templates.to_local(s, tz) == wanted), None)
+        if match and moving_from:
+            state_machine.transition(BookingState.CONFIRM_RESCHEDULE, pending_slot_start=match)
+            return templates.confirm_reschedule(moving_from, match, tz)
         if match:
             state_machine.transition(BookingState.AWAITING_CONFIRMATION, pending_slot_start=match)
             return f"{templates.pretty_time(match, tz)} is open. Should I go ahead and book it?"
@@ -403,12 +487,12 @@ class Agent:
 
         if not confirmed:
             # "actually make it 11am instead" -> check the new time right away
-            requested, day = await _read_requested_time(llm, message, history, tz)
-            if requested:
-                return await self._check_time(state_machine, requested, tz)
-            if day:
+            ask = await _read_requested_time(llm, message, history, tz)
+            if ask.exact:
+                return await self._check_time(state_machine, ask.exact, tz)
+            if ask.day or ask.part:
                 state_machine.transition(BookingState.COLLECTING_TIME, pending_slot_start=None)
-                return await self._offer_times(day, tz)
+                return await self._offer_times(ask.day, tz, ask.part)
             if _DECLINE_INTENT.search(message):
                 state_machine.transition(BookingState.COLLECTING_TIME, pending_slot_start=None)
                 return "No problem -- what time would work better?"
@@ -450,6 +534,136 @@ class Agent:
             llm, memory_context, message, history,
             f"To finish booking {pending}, I just need an email address for the invite.",
         )
+
+    # ---------- changing an existing booking ----------
+
+    def _target(self, db: Session, state_machine: ConversationStateMachine) -> BookingAttempt | None:
+        target_id = state_machine.row.target_booking_id
+        return db.get(BookingAttempt, target_id) if target_id else None
+
+    async def _start_change(
+        self, db: Session, user_id: str, llm: LLMProvider, state_machine: ConversationStateMachine,
+        message: str, history: list[dict], tz: str, action: str,
+    ) -> str:
+        """"cancel my Friday call" / "move my call to Monday": find which booking they mean."""
+        bookings = _upcoming_bookings(db, user_id)
+        if not bookings:
+            state_machine.transition(BookingState.IDLE)
+            return templates.no_upcoming()
+
+        ask = await _read_requested_time(llm, message, history, tz)
+        target = bookings[0] if len(bookings) == 1 else _match_booking(bookings, ask, tz)
+        if not target:
+            choose = BookingState.CHOOSE_TO_CANCEL if action == "cancel" else BookingState.CHOOSE_TO_RESCHEDULE
+            state_machine.transition(choose, target_booking_id=None, pending_slot_start=None)
+            return templates.which_booking(bookings, action, tz)
+
+        # With a single booking, "move my call to Monday at 10" already names the new time
+        new_time = ask if (action == "reschedule" and len(bookings) == 1 and _match_booking(bookings, ask, tz) is None) else TimeAsk()
+        return await self._begin_change(state_machine, target, action, tz, new_time)
+
+    async def _begin_change(
+        self, state_machine: ConversationStateMachine, target: BookingAttempt, action: str, tz: str,
+        new_time: TimeAsk = TimeAsk(),
+    ) -> str:
+        if action == "cancel":
+            state_machine.transition(BookingState.CONFIRM_CANCEL, target_booking_id=target.id)
+            return templates.confirm_cancel(target.requested_start, tz)
+
+        state_machine.transition(BookingState.RESCHEDULE_TIME, target_booking_id=target.id, pending_slot_start=None)
+        if new_time.exact:
+            return await self._check_time(state_machine, new_time.exact, tz, moving_from=target.requested_start)
+        if new_time.day or new_time.part:
+            return await self._offer_times(new_time.day, tz, new_time.part)
+        return templates.ask_new_time(target.requested_start, tz)
+
+    async def _choose_booking(
+        self, db: Session, user_id: str, llm: LLMProvider, state_machine: ConversationStateMachine,
+        message: str, history: list[dict], memory_context: str, tz: str, action: str,
+    ) -> str:
+        bookings = _upcoming_bookings(db, user_id)
+        if not bookings:
+            state_machine.transition(BookingState.IDLE)
+            return templates.no_upcoming()
+        target = _match_booking(bookings, await _read_requested_time(llm, message, history, tz), tz)
+        if target:
+            return await self._begin_change(state_machine, target, action, tz)
+        if _KEEP_IT.search(message):
+            state_machine.transition(BookingState.IDLE)
+            return "Okay, I'll leave your calls as they are."
+        return templates.which_booking(bookings, action, tz)
+
+    async def _confirm_cancel(
+        self, db: Session, llm: LLMProvider, state_machine: ConversationStateMachine, message: str,
+        history: list[dict], memory_context: str, tz: str,
+    ) -> str:
+        target = self._target(db, state_machine)
+        if not target or target.status != "confirmed":
+            state_machine.transition(BookingState.IDLE, target_booking_id=None)
+            return "I can't find that booking anymore, so there's nothing to cancel."
+
+        if _KEEP_IT.search(message) and not re.search(r"\bcancel (it|that)\b", message, re.IGNORECASE):
+            state_machine.transition(BookingState.IDLE, target_booking_id=None)
+            return f"Okay, I'll keep your call on {templates.pretty_time(target.requested_start, tz)}."
+        if not (_is_confirmation(message) or re.search(r"\bcancel\b", message, re.IGNORECASE)):
+            return await self._answer_and_nudge(
+                llm, memory_context, message, history,
+                f"Should I cancel your call on {templates.pretty_time(target.requested_start, tz)}? Say yes or no.",
+            )
+
+        with timed("tool_call:cancel_meeting"):
+            result = await CancelMeetingTool().run(uid=target.calcom_booking_uid, reason="Cancelled via Sarjy")
+        if not result.ok:
+            state_machine.transition(BookingState.IDLE, target_booking_id=None)
+            return f"I couldn't cancel it just now ({result.error}), so it's still booked. Want me to try again?"
+        target.status = "cancelled"
+        db.commit()
+        state_machine.transition(BookingState.CHANGED, target_booking_id=None)
+        return templates.cancelled_booking(target.requested_start, tz)
+
+    async def _reschedule_time(
+        self, db: Session, llm: LLMProvider, state_machine: ConversationStateMachine, message: str,
+        history: list[dict], memory_context: str, tz: str,
+    ) -> str:
+        target = self._target(db, state_machine)
+        if not target:
+            state_machine.transition(BookingState.IDLE)
+            return "I can't find that booking anymore."
+        ask = await _read_requested_time(llm, message, history, tz)
+        if ask.exact:
+            return await self._check_time(state_machine, ask.exact, tz, moving_from=target.requested_start)
+        if ask.day or ask.part:
+            return await self._offer_times(ask.day, tz, ask.part)
+        return await self._answer_and_nudge(
+            llm, memory_context, message, history,
+            f"What day and time would you like instead of {templates.pretty_time(target.requested_start, tz)}? Or say 'never mind' to keep it.",
+        )
+
+    async def _confirm_reschedule(
+        self, db: Session, llm: LLMProvider, state_machine: ConversationStateMachine, message: str,
+        history: list[dict], memory_context: str, tz: str,
+    ) -> str:
+        target, new_start = self._target(db, state_machine), state_machine.row.pending_slot_start
+        if not target or not new_start:
+            state_machine.transition(BookingState.IDLE)
+            return "I lost track of that change -- could you tell me again which call to move?"
+
+        if not _is_confirmation(message):
+            state_machine.transition(BookingState.RESCHEDULE_TIME, pending_slot_start=None)
+            return await self._reschedule_time(db, llm, state_machine, message, history, memory_context, tz)
+
+        with timed("tool_call:reschedule_meeting"):
+            result = await RescheduleMeetingTool().run(uid=target.calcom_booking_uid, start=new_start)
+        if not result.ok:
+            state_machine.transition(BookingState.IDLE, target_booking_id=None, pending_slot_start=None)
+            return f"I couldn't move it just now ({result.error}), so it's still on {templates.pretty_time(target.requested_start, tz)}."
+        target.requested_start = new_start
+        target.calcom_booking_uid = result.data.get("uid")
+        target.calcom_booking_id = result.data.get("id")
+        target.idempotency_key = _idempotency_key(target.conversation_id, target.event_type_id, new_start)
+        db.commit()
+        state_machine.transition(BookingState.CHANGED, target_booking_id=None, pending_slot_start=None)
+        return templates.rescheduled(new_start, target.calcom_booking_uid, tz)
 
     async def _create_booking(
         self, db: Session, user_id: str, conversation_id: int, state_machine: ConversationStateMachine,

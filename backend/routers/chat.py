@@ -20,7 +20,9 @@ class ChatRequest(BaseModel):
     timezone: Optional[str] = None  # the browser's IANA timezone, e.g. "Asia/Karachi"
 
 
-def _get_or_create_conversation(db: Session, user_id: str, conversation_id: Optional[int]) -> Conversation:
+def _get_or_create_conversation(
+    db: Session, user_id: str, conversation_id: Optional[int], first_message: str = ""
+) -> Conversation:
     conv = None
     if conversation_id:
         # Only continue a conversation that belongs to this user
@@ -30,7 +32,8 @@ def _get_or_create_conversation(db: Session, user_id: str, conversation_id: Opti
             .first()
         )
     if not conv:
-        conv = Conversation(user_id=user_id, title="conversation")
+        # the first message doubles as the chat's title in the sidebar
+        conv = Conversation(user_id=user_id, title=first_message.strip()[:60] or "conversation")
         db.add(conv)
         db.commit()
         db.refresh(conv)
@@ -41,7 +44,7 @@ def _get_or_create_conversation(db: Session, user_id: str, conversation_id: Opti
 async def message(req: ChatRequest, background: BackgroundTasks, user_id: str = Depends(current_user)):
     db: Session = SessionLocal()
     try:
-        conv = _get_or_create_conversation(db, user_id, req.conversation_id)
+        conv = _get_or_create_conversation(db, user_id, req.conversation_id, req.message)
 
         user_msg = Message(conversation_id=conv.id, role="user", content=req.message)
         db.add(user_msg)
@@ -73,5 +76,29 @@ def history(conversation_id: int, user_id: str = Depends(current_user)):
             .all()
         )
         return {"items": [{"id": r.id, "role": r.role, "content": r.content} for r in rows]}
+    finally:
+        db.close()
+
+
+@router.get("/conversations")
+def conversations(user_id: str = Depends(current_user)):
+    """The signed-in user's chats, newest first, for the sidebar."""
+    db: Session = SessionLocal()
+    try:
+        rows = (
+            db.query(Conversation).filter(Conversation.user_id == user_id)
+            .order_by(Conversation.id.desc()).limit(50).all()
+        )
+        items = []
+        for conv in rows:
+            first = (
+                db.query(Message).filter(Message.conversation_id == conv.id, Message.role == "user")
+                .order_by(Message.id).first()
+            )
+            if not first:
+                continue  # never used
+            title = conv.title if conv.title and conv.title != "conversation" else first.content
+            items.append({"id": conv.id, "title": title[:60]})
+        return {"items": items}
     finally:
         db.close()

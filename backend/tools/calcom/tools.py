@@ -114,3 +114,28 @@ class CancelMeetingTool(Tool):
         except ToolError as exc:
             return ToolResult(ok=False, error=str(exc))
         return ToolResult(ok=True, data=data)
+
+
+class RescheduleMeetingTool(Tool):
+    name = "reschedule_meeting"
+    description = "Move a Cal.com booking to a new start time that check_availability returned."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "uid": {"type": "string"},
+            "start": {"type": "string", "description": "Exact ISO8601 start time from a real check_availability result"},
+        },
+        "required": ["uid", "start"],
+    }
+
+    def __init__(self, client: CalComClient | None = None):
+        self.client = client or CalComClient()
+
+    async def run(self, uid: str, start: str, **_) -> ToolResult:
+        try:
+            data = await self.client.reschedule_booking(uid, start)
+        except ToolError as exc:
+            return ToolResult(ok=False, error=str(exc))
+        if not data.get("uid"):
+            return ToolResult(ok=False, error="Cal.com response missing booking uid")
+        return ToolResult(ok=True, data=data)

@@ -179,6 +179,31 @@
       .mic.recording { background: var(--danger); }
       .mic.recording::before { opacity: 0.3; transform: scale(calc(1 + var(--level) * 0.9)); }
 
+      /* ---------- chats sidebar ---------- */
+      .chats {
+        width: 250px; flex: none; border-right: 1px solid var(--border); background: var(--surface);
+        display: flex; flex-direction: column; min-height: 0;
+      }
+      .chats-head { padding: 12px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
+      .chats-head .new {
+        flex: 1; border: 0; border-radius: 10px; padding: 9px 12px; color: #fff; font-weight: 600;
+        background: var(--user-bubble);
+      }
+      .chat-list { list-style: none; margin: 0; padding: 8px; overflow-y: auto; }
+      .chat-list li button {
+        width: 100%; text-align: left; border: 0; background: transparent; color: var(--text);
+        padding: 9px 10px; border-radius: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .chat-list li button:hover { background: var(--surface-2); }
+      .chat-list li button.active { background: var(--surface-2); font-weight: 600; }
+      .chat-list .none { color: var(--muted); font-size: 14px; padding: 8px 10px; }
+      .chats-toggle, #chats-close { display: none; }
+      @media (max-width: 900px) {
+        #chats-close { display: inline-block; }
+        .chats { position: fixed; top: 0; left: 0; bottom: 0; width: min(290px, 85vw); z-index: 10; box-shadow: var(--shadow); }
+        .chats-toggle { display: inline-flex; }
+      }
+
       /* ---------- memory panel ---------- */
       .memory {
         width: 300px; flex: none; border-left: 1px solid var(--border); background: var(--surface);
@@ -230,17 +255,25 @@
     <!-- app -->
     <div id="app" class="app" hidden>
       <header>
+        <button class="ghost chats-toggle" id="chats-toggle" title="Your chats">☰</button>
         <div class="orb small" id="header-orb"></div>
         <div class="title">Sarjy</div>
         <span class="user-chip" id="whoami"></span>
         <button class="ghost" id="memory-toggle" title="What Sarjy remembers about you">
           <span>🧠</span><span class="label">Memory</span><span class="count" id="memory-count">0</span>
         </button>
-        <button class="ghost" id="new-chat" title="Start a new conversation">＋<span class="label">New chat</span></button>
         <button class="ghost" id="logout">Sign out</button>
       </header>
 
       <div class="body">
+        <aside class="chats" id="chats-panel">
+          <div class="chats-head">
+            <button class="new" id="new-chat">＋ New chat</button>
+            <button class="memory-close" id="chats-close" title="Close" style="position:static">×</button>
+          </div>
+          <ul class="chat-list" id="chat-list"></ul>
+        </aside>
+
         <main class="chat">
           <div class="messages" id="messages">
             <div class="messages-inner" id="log"></div>
@@ -302,9 +335,15 @@
         $('app').hidden = !signedIn;
         if (!signedIn) return;
         $('whoami').textContent = localStorage.getItem('sarjy_username') || '';
-        $('memory-panel').hidden = window.innerWidth <= 900;
+        const narrow = window.innerWidth <= 900;
+        $('memory-panel').hidden = narrow;
+        $('chats-panel').hidden = narrow;
         renderVoiceToggle();
-        newChat();
+        // reopen the chat you were in (e.g. after a refresh), otherwise start fresh
+        let last = null;
+        try { last = sessionStorage.getItem('sarjy_conv'); } catch (e) {}
+        if (last) openChat(Number(last)); else newChat();
+        loadChats();
         loadMemory();
       }
 
@@ -334,6 +373,8 @@
         stopSpeaking();
         localStorage.removeItem('sarjy_token');
         localStorage.removeItem('sarjy_username');
+        try { sessionStorage.removeItem('sarjy_conv'); } catch (e) {}
+        conversationId = null;
         knownMemoryIds = new Set();
         memoryLoaded = false;
         showApp();
@@ -441,14 +482,67 @@
         logEl.appendChild(wrap);
       }
 
+      function setConversation(id) {
+        conversationId = id;
+        try { id ? sessionStorage.setItem('sarjy_conv', id) : sessionStorage.removeItem('sarjy_conv'); } catch (e) {}
+        document.querySelectorAll('.chat-list button').forEach((b) => b.classList.toggle('active', Number(b.dataset.id) === id));
+      }
+
       function newChat() {
         stopSpeaking();
-        conversationId = null;
+        setConversation(null);
         showEmptyState();
         setStatus('idle');
         setBusy(false);
+        if (window.innerWidth <= 900) $('chats-panel').hidden = true;
       }
       $('new-chat').onclick = newChat;
+
+      // ---------- chats sidebar ----------
+      $('chats-toggle').onclick = () => { $('chats-panel').hidden = !$('chats-panel').hidden; };
+      $('chats-close').onclick = () => { $('chats-panel').hidden = true; };
+
+      async function loadChats() {
+        let items = [];
+        try { items = (await (await api('/conversations')).json()).items || []; } catch (e) { return; }
+        const list = $('chat-list');
+        list.textContent = '';
+        if (!items.length) {
+          const li = document.createElement('li');
+          li.className = 'none';
+          li.textContent = 'Your chats will show up here.';
+          list.appendChild(li);
+        }
+        for (const item of items) {
+          const li = document.createElement('li');
+          const b = document.createElement('button');
+          b.textContent = item.title;
+          b.title = item.title;
+          b.dataset.id = item.id;
+          b.classList.toggle('active', item.id === conversationId);
+          b.onclick = () => openChat(item.id);
+          li.appendChild(b);
+          list.appendChild(li);
+        }
+      }
+
+      // open an earlier chat: its messages come back, and Sarjy continues with that chat's context
+      async function openChat(id) {
+        stopSpeaking();
+        let items = [];
+        try {
+          const res = await api(`/history?conversation_id=${id}`);
+          if (!res.ok) { newChat(); return; }
+          items = (await res.json()).items || [];
+        } catch (e) { return; }
+        setConversation(id);
+        logEl.textContent = '';
+        if (!items.length) showEmptyState();
+        for (const m of items) addRow(m.role === 'user' ? 'user' : 'sarjy', m.content);
+        setStatus('idle');
+        setBusy(false);
+        if (window.innerWidth <= 900) $('chats-panel').hidden = true;
+      }
 
       // ---------- sending a message ----------
       $('composer').onsubmit = (e) => {
@@ -474,7 +568,9 @@
           });
           if (!res.ok) throw new Error('bad response');
           const j = await res.json();
-          conversationId = j.conversation_id;
+          const isNew = conversationId !== j.conversation_id;
+          setConversation(j.conversation_id);
+          if (isNew) loadChats();  // a new chat shows up in the sidebar
           await speakAndType(pending.body, j.reply);
           // memory is saved in the background after the reply, so check for new facts shortly after
           setTimeout(loadMemory, 2500);

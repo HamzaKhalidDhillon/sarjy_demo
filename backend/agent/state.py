@@ -17,6 +17,13 @@ class BookingState(str, Enum):
     AWAITING_CONTACT = "awaiting_contact"
     BOOKED = "booked"
     FAILED = "failed"
+    # changing an existing booking
+    CHOOSE_TO_CANCEL = "choose_to_cancel"
+    CHOOSE_TO_RESCHEDULE = "choose_to_reschedule"
+    CONFIRM_CANCEL = "confirm_cancel"
+    RESCHEDULE_TIME = "reschedule_time"
+    CONFIRM_RESCHEDULE = "confirm_reschedule"
+    CHANGED = "changed"  # a cancel/reschedule was just completed
 
 
 class ConversationStateMachine:
@@ -52,13 +59,16 @@ class ConversationStateMachine:
 
     def maybe_cancel(self, message: str) -> bool:
         """Explicit cancel phrases reset to idle and clear any pending booking context."""
-        if self.state == BookingState.IDLE:
+        # Nothing in progress (after a booking, "cancel that call" means the real booking, which
+        # the agent handles), or the user is answering "should I cancel it?" themselves.
+        if self.state in (BookingState.IDLE, BookingState.BOOKED, BookingState.CHANGED, BookingState.CONFIRM_CANCEL):
             return False
         lowered = message.lower()
         if any(phrase in lowered for phrase in CANCEL_PHRASES):
             self.transition(
                 BookingState.IDLE,
                 pending_event_type_id=None, pending_slot_start=None, pending_attendee_email=None,
+                target_booking_id=None,
             )
             return True
         return False

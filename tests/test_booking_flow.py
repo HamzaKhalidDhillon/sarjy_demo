@@ -30,6 +30,19 @@ class FakeAvailability:
         return ToolResult(ok=True, data={"slots": [SLOT, SLOT_2]})
 
 
+class FakeCancel:
+    calls: list[dict] = []
+
+    async def run(self, **kwargs):
+        FakeCancel.calls.append(kwargs)
+        return ToolResult(ok=True, data={})
+
+
+class FakeReschedule:
+    async def run(self, uid, start, **_):
+        return ToolResult(ok=True, data={"uid": "MOVED-UID", "id": 2})
+
+
 class FakeBooking:
     calls: list[dict] = []
 
@@ -43,7 +56,10 @@ def chat(monkeypatch):
     """Returns say(message, llm) -> reply, running one turn the way the /message router does."""
     monkeypatch.setattr(orchestrator, "CheckAvailabilityTool", FakeAvailability)
     monkeypatch.setattr(orchestrator, "BookMeetingTool", FakeBooking)
+    monkeypatch.setattr(orchestrator, "CancelMeetingTool", FakeCancel)
+    monkeypatch.setattr(orchestrator, "RescheduleMeetingTool", FakeReschedule)
     FakeBooking.calls = []
+    FakeCancel.calls = []
 
     async def event_type_id(client):
         return 1
@@ -111,14 +127,14 @@ async def test_blocked_message_gets_the_refusal(chat):
 async def test_timezone_conversion_happens_in_code_not_in_the_llm():
     # Seen live: gpt-3.5 turned "11am UTC" into "2026-09-29T4:00" for a user in Pakistan.
     utc = ScriptedLLM('{"date": "2099-01-05", "time": "10:00", "timezone": "UTC"}')
-    assert await orchestrator._read_requested_time(utc, "10am UTC", [], "Asia/Karachi") == ("2099-01-05T15:00", None)
+    assert (await orchestrator._read_requested_time(utc, "10am UTC", [], "Asia/Karachi")).exact == "2099-01-05T15:00"
 
     # "PKT" isn't an IANA name: the model is echoing Sarjy's own message, so it's the user's zone
     pkt = ScriptedLLM('{"date": "2099-01-05", "time": "9:00", "timezone": "PKT"}')
-    assert await orchestrator._read_requested_time(pkt, "the first one", [], "Asia/Karachi") == ("2099-01-05T09:00", None)
+    assert (await orchestrator._read_requested_time(pkt, "the first one", [], "Asia/Karachi")).exact == "2099-01-05T09:00"
 
     junk = ScriptedLLM("sure! 10am works")
-    assert await orchestrator._read_requested_time(junk, "10am", [], "UTC") == (None, None)
+    assert await orchestrator._read_requested_time(junk, "10am", [], "UTC") == orchestrator.TimeAsk()
 
 
 @pytest.mark.parametrize("text,email", [
@@ -174,3 +190,64 @@ async def test_a_different_email_replaces_the_saved_one(chat):
 ])
 def test_what_counts_as_a_yes(text, expected):
     assert orchestrator._is_confirmation(text) == expected
+
+
+async def _book(chat, when="2099-01-05 10:00"):
+    await chat(f"book a call {when}")
+    await chat("yes")
+    return await chat("hamza@example.com")
+
+
+@pytest.mark.asyncio
+async def test_cancel_my_call_asks_first_then_cancels_the_real_booking(chat):
+    await _book(chat)
+    assert "Should I cancel your call on Monday Jan 5 at 10:00 AM UTC?" in await chat("please cancel my call")
+    done = await chat("yes")
+    assert FakeCancel.calls[-1]["uid"] == "REAL-UID"
+    assert "is cancelled" in done
+    assert await chat("what calls do I have?") == templates.nothing_booked_yet()
+
+
+@pytest.mark.asyncio
+async def test_no_keeps_the_booking(chat):
+    await _book(chat)
+    await chat("cancel my meeting")
+    assert "I'll keep your call" in await chat("no, keep it")
+    assert FakeCancel.calls == []
+
+
+@pytest.mark.asyncio
+async def test_with_two_bookings_sarjy_asks_which_one(chat):
+    await _book(chat, "2099-01-05 10:00")
+    await _book(chat, "2099-01-06 10:00")
+    which = await chat("cancel my call")
+    assert "You have 2 upcoming calls" in which and "Which one should I cancel?" in which
+    pick = await chat("the tuesday one", ScriptedLLM('{"date": "2099-01-06", "time": null, "timezone": null}'))
+    assert "Tuesday Jan 6" in pick
+
+
+@pytest.mark.asyncio
+async def test_reschedule_moves_the_booking_after_confirmation(chat):
+    await _book(chat, "2099-01-05 10:00")
+    ask = await chat("can you move my call?")
+    assert "What day and time would you like to move" in ask
+    confirm = await chat("2099-01-06 10:00")
+    assert "Should I move your call from Monday Jan 5" in confirm
+    done = await chat("yes")
+    assert "now on Tuesday Jan 6 at 10:00 AM UTC" in done and "MOVED-UID" in done
+    assert "Tuesday Jan 6" in await chat("what calls do I have?")
+
+
+@pytest.mark.asyncio
+async def test_llm_cannot_claim_it_cancelled_something(chat):
+    await _book(chat)
+    reply = await chat("thanks", ScriptedLLM("No problem, I've cancelled your call."))
+    assert "cancelled" not in reply and "upcoming call" in reply
+
+
+@pytest.mark.asyncio
+async def test_never_mind_during_reschedule_keeps_the_call(chat):
+    await _book(chat)
+    await chat("reschedule my call")
+    assert await chat("never mind, keep it") == "Okay, I'll leave your call as it is."
+    assert "upcoming call" in await chat("what calls do I have?")

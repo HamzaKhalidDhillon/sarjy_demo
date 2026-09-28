@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 from backend.models import Base
 
@@ -21,8 +21,25 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+def _add_missing_columns():
+    """create_all() only creates missing *tables*. New nullable columns on tables that already
+    exist (like the live Supabase ones) are added here -- enough for this project's small
+    schema changes without bringing in a migration tool."""
+    inspector = inspect(engine)
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        existing = {c["name"] for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name not in existing:
+                column_type = column.type.compile(engine.dialect)
+                with engine.begin() as conn:
+                    conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column_type}'))
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
+    _add_missing_columns()
 
     if engine.dialect.name == "postgresql":
         # Supabase serves every table in the public schema through its REST API, readable with
