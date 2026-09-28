@@ -15,12 +15,13 @@ from sqlalchemy.orm import Session
 from backend.agent import memory, templates
 from backend.agent.guardrails import SYSTEM_PROMPT, InputGuardrail, OutputGuardrail
 from backend.agent.state import BookingState, ConversationStateMachine
-from backend.core.config import settings
 from backend.core.logging import logger, timed
 from backend.llm.base import LLMProvider
 from backend.llm.factory import get_llm_provider
 from backend.models import BookingAttempt
-from backend.tools.calcom.tools import BookMeetingTool, CheckAvailabilityTool
+from backend.core.errors import ToolError
+from backend.tools.calcom.client import CalComClient
+from backend.tools.calcom.tools import BookMeetingTool, CheckAvailabilityTool, get_event_type_id
 
 _BOOK_INTENT = re.compile(
     r"\b(book|schedule|set up)\b.{0,20}\b(meeting|call|appointment|chat)\b", re.IGNORECASE
@@ -93,8 +94,8 @@ class Agent:
             memories = memory.recall(db, user_id)
         memory_context = memory.format_memories_for_prompt(memories)
 
-        if state_machine.state == BookingState.IDLE and _BOOK_INTENT.search(message):
-            reply = await self._start_booking(db, state_machine)
+        if state_machine.state in (BookingState.IDLE, BookingState.BOOKED) and _BOOK_INTENT.search(message):
+            reply = await self._start_booking(db, llm, state_machine, message)
         elif state_machine.state == BookingState.COLLECTING_TIME:
             reply = await self._collect_time(db, llm, state_machine, message)
         elif state_machine.state == BookingState.AWAITING_CONFIRMATION:
@@ -123,10 +124,16 @@ class Agent:
         with timed("llm_chat"):
             return await llm.complete(messages)
 
-    async def _start_booking(self, db: Session, state_machine: ConversationStateMachine) -> str:
-        state_machine.transition(
-            BookingState.COLLECTING_TIME, pending_event_type_id=settings.calcom_event_type_id
-        )
+    async def _start_booking(
+        self, db: Session, llm: LLMProvider, state_machine: ConversationStateMachine, message: str
+    ) -> str:
+        state_machine.transition(BookingState.COLLECTING_TIME)
+
+        # "Book me a call tomorrow at 3pm" -- check that time straight away
+        requested = await _extract_requested_datetime(llm, message)
+        if requested:
+            return await self._check_time(state_machine, requested)
+
         today = datetime.now(timezone.utc)
         start = today.strftime("%Y-%m-%d")
         end = (today + timedelta(days=6)).strftime("%Y-%m-%d")
@@ -141,8 +148,10 @@ class Agent:
     ) -> str:
         requested = await _extract_requested_datetime(llm, message)
         if not requested:
-            return "I didn't catch a specific day and time -- could you give me one, e.g. '2026-09-25 15:00'?"
+            return "I didn't catch a specific day and time -- could you give me one, e.g. 'tomorrow at 3pm'?"
+        return await self._check_time(state_machine, requested)
 
+    async def _check_time(self, state_machine: ConversationStateMachine, requested: str) -> str:
         date_only = requested.split("T")[0]
         with timed("tool_call:check_availability"):
             result = await CheckAvailabilityTool().run(start_date=date_only, end_date=date_only)
@@ -151,11 +160,17 @@ class Agent:
 
         available = result.data.get("slots", [])
         match = next((s for s in available if s.startswith(requested[:16])), None)
-        if not match:
-            return templates.slots_offer(available)
+        if match:
+            state_machine.transition(BookingState.AWAITING_CONFIRMATION, pending_slot_start=match)
+            return f"{templates.pretty_time(match)} is open. Should I go ahead and book it?"
 
-        state_machine.transition(BookingState.AWAITING_CONFIRMATION, pending_slot_start=match)
-        return f"{match} is open. Should I go ahead and book it?"
+        # That time is taken. Suggest other times the same day, or the week after if the day is full.
+        if not available:
+            week_later = (datetime.fromisoformat(date_only) + timedelta(days=7)).strftime("%Y-%m-%d")
+            with timed("tool_call:check_availability"):
+                result = await CheckAvailabilityTool().run(start_date=date_only, end_date=week_later)
+            available = result.data.get("slots", []) if result.ok else []
+        return templates.slot_taken(requested, available)
 
     async def _handle_confirmation(
         self, db: Session, user_id: str, conversation_id: int,
@@ -168,7 +183,7 @@ class Agent:
         if not _CONFIRM_INTENT.search(message):
             # Off-script: answer normally but keep the pending confirmation parked.
             reply = await self._chat(get_llm_provider(), "", message)
-            return f"{reply}\n(By the way, I still have {state_machine.row.pending_slot_start} pending -- say 'yes' to confirm it, or 'never mind' to drop it.)"
+            return f"{reply}\n(By the way, I still have {templates.pretty_time(state_machine.row.pending_slot_start)} pending -- say 'yes' to confirm it, or 'never mind' to drop it.)"
 
         if not state_machine.row.pending_attendee_email:
             state_machine.transition(BookingState.AWAITING_CONTACT)
@@ -191,7 +206,10 @@ class Agent:
         self, db: Session, user_id: str, conversation_id: int, state_machine: ConversationStateMachine,
     ) -> str:
         start = state_machine.row.pending_slot_start
-        event_type_id = state_machine.row.pending_event_type_id or settings.calcom_event_type_id
+        try:
+            event_type_id = await get_event_type_id(CalComClient())
+        except ToolError as exc:
+            return templates.booking_failed(str(exc))
         attendee_email = state_machine.row.pending_attendee_email
         idem_key = _idempotency_key(conversation_id, event_type_id, start)
 

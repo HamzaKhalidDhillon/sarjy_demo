@@ -15,10 +15,6 @@ services:
         sync: false
       - key: CALCOM_API_KEY
         sync: false
-      - key: CALCOM_USERNAME
-        sync: false
-      - key: CALCOM_EVENT_TYPE_ID
-        sync: false
       - key: DATABASE_URL  # Supabase "Session pooler" connection string
         sync: false
       - key: ALLOWED_ORIGINS

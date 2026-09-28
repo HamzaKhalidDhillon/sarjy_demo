@@ -3,6 +3,24 @@ from backend.core.errors import ToolError
 from backend.tools.base import Tool, ToolResult
 from backend.tools.calcom.client import CalComClient
 
+_event_type_id: int | None = None
+
+
+async def get_event_type_id(client: CalComClient) -> int:
+    """CALCOM_EVENT_TYPE_ID if set, otherwise looked up from the Cal.com account (once, then
+    cached): the 30min event type if there is one, else the first public one."""
+    global _event_type_id
+    if settings.calcom_event_type_id:
+        return settings.calcom_event_type_id
+    if _event_type_id is None:
+        # Skip hidden ones -- new Cal.com accounts come with a hidden "secret" event type
+        event_types = [et for et in await client.get_event_types() if not et.get("hidden")]
+        if not event_types:
+            raise ToolError("No public event types on this Cal.com account -- create one first")
+        preferred = [et for et in event_types if et.get("slug") == "30min"]
+        _event_type_id = (preferred or event_types)[0]["id"]
+    return _event_type_id
+
 
 class CheckAvailabilityTool(Tool):
     name = "check_availability"
@@ -22,9 +40,8 @@ class CheckAvailabilityTool(Tool):
 
     async def run(self, start_date: str, end_date: str, timezone: str = "UTC", **_) -> ToolResult:
         try:
-            slots_by_date = await self.client.get_slots(
-                settings.calcom_event_type_id, start_date, end_date, timezone
-            )
+            event_type_id = await get_event_type_id(self.client)
+            slots_by_date = await self.client.get_slots(event_type_id, start_date, end_date, timezone)
         except ToolError as exc:
             return ToolResult(ok=False, error=str(exc))
 
@@ -57,8 +74,9 @@ class BookMeetingTool(Tool):
         attendee_email: str | None = None, **_,
     ) -> ToolResult:
         try:
+            event_type_id = await get_event_type_id(self.client)
             data = await self.client.create_booking(
-                settings.calcom_event_type_id, start, attendee_name, attendee_timezone, attendee_email
+                event_type_id, start, attendee_name, attendee_timezone, attendee_email
             )
         except ToolError as exc:
             # A definite response came back from Cal.com and it was an error -- not ambiguous.

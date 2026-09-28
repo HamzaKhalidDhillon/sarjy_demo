@@ -11,6 +11,9 @@ class FakeCalComClient:
         self._raise_tool_error = raise_tool_error
         self._raise_network_error = raise_network_error
 
+    async def get_event_types(self):
+        return [{"id": 42, "slug": "30min"}]
+
     async def get_slots(self, event_type_id, start, end, timezone="UTC"):
         if self._raise_tool_error:
             raise ToolError("boom")
@@ -78,3 +81,15 @@ async def test_book_meeting_network_error_is_ambiguous_not_failed():
     )
     assert not result.ok
     assert result.ambiguous
+
+
+def test_slot_taken_suggests_alternatives():
+    from backend.agent import templates
+    reply = templates.slot_taken("2026-09-29T15:00", ["2026-09-29T16:00:00.000Z"])
+    assert "isn't available" in reply
+    assert "Tuesday Sep 29 at 4:00 PM UTC" in reply
+
+
+def test_slot_taken_with_no_alternatives_offers_another_date():
+    from backend.agent import templates
+    assert "another date" in templates.slot_taken("2026-09-29T15:00", [])
