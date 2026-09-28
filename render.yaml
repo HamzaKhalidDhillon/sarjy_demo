@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: sarjy
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: LLM_PROVIDER
+        sync: false
+      - key: CALCOM_API_KEY
+        sync: false
+      - key: CALCOM_USERNAME
+        sync: false
+      - key: CALCOM_EVENT_TYPE_ID
+        sync: false
+      - key: DATABASE_URL
+        value: sqlite:///./data/data.db
+      - key: ALLOWED_ORIGINS
+        value: "*"

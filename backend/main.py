@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.core.config import settings
@@ -42,6 +43,13 @@ async def add_request_id(request: Request, call_next):
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/frontend/")
+
+
 app.mount("/frontend", StaticFiles(directory=str(REPO_ROOT / "frontend"), html=True), name="frontend")
 
 app.include_router(health.router)
