@@ -83,11 +83,21 @@ cleanup. Two things only live testing caught, now fixed:
 
 ### Memory: cross-session recall
 
-`agent/memory.py` recalls all of a user's stored `Memory` facts before every LLM call and extracts
-new ones (favorite X, name, location, employer, explicit "remember that..." statements) after.
-This is deliberately a fast deterministic regex extractor, not a second LLM call -- cheap,
-testable, no added latency. This is what makes "what's my favorite color?" actually work across
-sessions; previously `/memory/set`/`/memory/get` existed but nothing called them automatically.
+Memory is keyed by the signed-in username. On **every turn**, `agent/memory.py` loads all of the
+user's saved facts and adds them to the LLM's instructions ("Known facts about this user: ..."),
+and the last few messages of the current conversation go along too, so Sarjy has both long-term
+memory and short-term context.
+
+**After the reply has been sent** (a FastAPI background task, so no added latency), the LLM picks
+out facts worth keeping from the user's message and returns them as JSON (`name`, `job`,
+`favorite_food`, ...). It's given the already-saved facts so it updates a key instead of creating
+duplicates. We started with a regex extractor ("my name is ...") but live testing showed people
+don't talk like that: "this is Hamza", "I'm really into sushi" were all missed. The regex patterns
+are still the fallback when no LLM is configured or its output isn't valid JSON. Guardrail-blocked
+messages are never stored, and keys/values are length-checked before saving.
+
+The UI shows everything Sarjy remembers in a side panel, and each fact can be deleted, so memory
+is visible and under the user's control rather than a black box.
 
 ### Booking flow, from the user's side
 
@@ -104,10 +114,14 @@ URL "without special setup", so this is one form, not an onboarding flow. What i
 and bookings are tied to an account nobody else can read, instead of a free-text user id anyone
 could type. See "Data security" below for how it's built.
 
-### Frontend: intentionally minimal
+### Frontend
 
-Effort went into the backend per the deep-dive choice above. The frontend stays the simple static
-page it already was.
+Still a single static `index.html` with plain JavaScript (no build step), but designed for voice:
+chat bubbles, a status line that walks through each step (listening -> uploading -> transcribing
+-> thinking -> preparing voice -> speaking), a mic whose ring follows your voice level, replies
+typed out in time with the audio, a stop button, a mute toggle, and the memory panel. Voice input
+is transcribed first (`/transcribe`) so your words appear before Sarjy answers. All server text is
+rendered with `textContent`, never `innerHTML`.
 
 ## Data security
 

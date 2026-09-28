@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from backend.db import SessionLocal
@@ -27,5 +27,30 @@ def get_memory(key: str, user_id: str = Depends(current_user)):
     try:
         rows = db.query(Memory).filter(Memory.user_id == user_id, Memory.key == key).all()
         return {"items": [{"id": r.id, "value": r.value} for r in rows]}
+    finally:
+        db.close()
+
+
+@router.get("/memory")
+def list_memory(user_id: str = Depends(current_user)):
+    """Everything Sarjy remembers about the signed-in user (shown in the UI's memory panel)."""
+    db: Session = SessionLocal()
+    try:
+        rows = db.query(Memory).filter(Memory.user_id == user_id).order_by(Memory.id).all()
+        return {"items": [{"id": r.id, "key": r.key, "value": r.value} for r in rows]}
+    finally:
+        db.close()
+
+
+@router.delete("/memory/{memory_id}")
+def forget_memory(memory_id: int, user_id: str = Depends(current_user)):
+    db: Session = SessionLocal()
+    try:
+        row = db.query(Memory).filter(Memory.id == memory_id, Memory.user_id == user_id).first()
+        if not row:
+            raise HTTPException(404, "Not found")
+        db.delete(row)
+        db.commit()
+        return {"ok": True}
     finally:
         db.close()

@@ -1,9 +1,10 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from backend.agent import memory
 from backend.agent.orchestrator import agent
 from backend.db import SessionLocal
 from backend.models import Conversation, Message
@@ -36,7 +37,7 @@ def _get_or_create_conversation(db: Session, user_id: str, conversation_id: Opti
 
 
 @router.post("/message")
-async def message(req: ChatRequest, user_id: str = Depends(current_user)):
+async def message(req: ChatRequest, background: BackgroundTasks, user_id: str = Depends(current_user)):
     db: Session = SessionLocal()
     try:
         conv = _get_or_create_conversation(db, user_id, req.conversation_id)
@@ -51,6 +52,7 @@ async def message(req: ChatRequest, user_id: str = Depends(current_user)):
         db.add(assist_msg)
         db.commit()
 
+        background.add_task(memory.remember, user_id, req.message)  # runs after the reply is sent
         return {"conversation_id": conv.id, "reply": reply}
     finally:
         db.close()

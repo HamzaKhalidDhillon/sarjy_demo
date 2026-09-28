@@ -1,16 +1,24 @@
 """Cross-session memory: recall() feeds known facts into the LLM context before a reply is
-generated, extract_facts() pulls new facts out of the exchange afterward. This is what actually
-makes "what's my favorite color?" work across sessions -- previously /memory/set and /memory/get
-existed but nothing ever called them automatically.
+generated, remember() pulls new facts out of the user's message afterward. This is what makes
+"what's my favorite color?" work across sessions.
+
+remember() asks the LLM to pick out the facts (people say "this is Hamza" or "I'm into sushi",
+which no fixed pattern list catches), and falls back to the regex patterns below when there's no
+LLM or its output isn't usable. It runs as a background task after the reply has been sent, so
+it adds no latency for the user.
 """
+import json
 import re
 
 from sqlalchemy.orm import Session
 
+from backend.agent.guardrails import InputGuardrail
+from backend.core.logging import logger, timed
+from backend.db import SessionLocal
+from backend.llm.factory import get_llm_provider
 from backend.models import Memory
 
-# Deliberately a fast deterministic extractor rather than a second LLM call: cheap, testable,
-# no added latency/cost. An LLM-based extractor behind a flag is a reasonable future upgrade.
+# Fallback extractor for when no LLM is configured
 _PATTERNS: list[tuple[str, str]] = [
     (r"\bmy favorite (\w+) is ([\w\s]+)", "favorite_{0}"),
     (r"\bmy favourite (\w+) is ([\w\s]+)", "favorite_{0}"),
@@ -60,3 +68,51 @@ def extract_facts(db: Session, user_id: str, user_message: str) -> list[str]:
             _upsert(db, user_id, key, value)
             written.append(key)
     return written
+
+
+_EXTRACT_PROMPT = (
+    "You pick out facts about the user worth remembering in future conversations: their name, "
+    "job, company, location, preferences, likes and dislikes, plans. Ignore small talk, questions "
+    "and anything about the assistant. Reply with ONLY JSON like "
+    '{"facts": {"name": "Hamza", "favorite_food": "sushi"}} using short snake_case keys, or '
+    '{"facts": {}} if there is nothing worth remembering. '
+    "Facts already saved (reuse the same key when a fact changes): "
+)
+_KEY = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+
+
+async def remember(user_id: str, user_message: str) -> list[str]:
+    """Background task: save any new facts from this message. Returns the keys written."""
+    if not InputGuardrail.check(user_message).allowed:
+        return []  # never store anything from a blocked message
+
+    db = SessionLocal()
+    try:
+        known = {m.key: m.value for m in recall(db, user_id)}
+        facts = None
+        try:
+            with timed("memory_extract_llm"):
+                raw = await get_llm_provider().complete([
+                    {"role": "system", "content": _EXTRACT_PROMPT + json.dumps(known)},
+                    {"role": "user", "content": user_message},
+                ])
+            facts = json.loads(raw.strip().removeprefix("```json").removesuffix("```")).get("facts")
+        except Exception:
+            pass  # offline provider, bad JSON, network error -> regex fallback below
+
+        if not isinstance(facts, dict):
+            return extract_facts(db, user_id, user_message)
+
+        written = []
+        for key, value in list(facts.items())[:10]:
+            if isinstance(value, list):  # e.g. {"likes": ["hiking", "chess"]}
+                value = ", ".join(str(v) for v in value)
+            value = str(value).strip()[:200]
+            if _KEY.match(str(key)) and value and known.get(key) != value:
+                _upsert(db, user_id, key, value)
+                written.append(key)
+        if written:
+            logger.info("memory saved keys=%s", written)
+        return written
+    finally:
+        db.close()

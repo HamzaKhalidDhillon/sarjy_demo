@@ -1,3 +1,4 @@
+import os
 import httpx
 
 from backend.core.config import settings
@@ -19,7 +20,7 @@ class OpenAIWhisperSTT(SttProvider):
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 with open(file_path, "rb") as f:
-                    files = {"file": ("audio.webm", f), "model": (None, "whisper-1")}
+                    files = {"file": (os.path.basename(file_path), f), "model": (None, "whisper-1")}
                     # max_attempts=1: retrying a multipart upload would need to reseek the file
                     # handle between attempts; the STT chain's fallback (local whisper -> offline)
                     # is the reliability net here instead.

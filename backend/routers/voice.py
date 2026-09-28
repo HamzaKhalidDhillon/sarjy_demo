@@ -2,9 +2,10 @@ import os
 import tempfile
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Response, UploadFile
 from sqlalchemy.orm import Session
 
+from backend.agent import memory
 from backend.agent.orchestrator import agent
 from backend.core.config import settings
 from backend.core.logging import timed
@@ -18,16 +19,14 @@ from backend.tts.chain import TtsChain
 router = APIRouter()
 
 
-@router.post("/stt")
-async def stt(
-    conversation_id: Optional[int] = Form(None),
-    audio: UploadFile = File(...),
-    user_id: str = Depends(current_user),
-):
-    """Accept an audio blob, transcribe it (bounded size, streamed to disk), run it through the
-    agent like a typed message, and persist both turns -- same contract as before."""
+async def _transcribe_upload(audio: UploadFile) -> str | None:
+    """Stream the upload to a bounded-size temp file and transcribe it. None if it's too big."""
+    # keep the real audio type (Safari records mp4, Chrome/Firefox webm) so Whisper reads it right
+    suffix = os.path.splitext(audio.filename or "")[1].lower()
+    if suffix not in (".webm", ".mp4", ".m4a", ".ogg", ".wav", ".mp3"):
+        suffix = ".webm"
     total = 0
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp_path = tmp.name
         while True:
             chunk = await audio.read(1024 * 64)
@@ -37,17 +36,40 @@ async def stt(
             if total > settings.max_upload_bytes:
                 tmp.close()
                 os.unlink(tmp_path)
-                return {"error": "file_too_large", "max_bytes": settings.max_upload_bytes}
+                return None
             tmp.write(chunk)
 
     try:
         with timed("stt_total"):
-            transcript = await SttChain().run(tmp_path)
+            return await SttChain().run(tmp_path)
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+@router.post("/transcribe")
+async def transcribe(audio: UploadFile = File(...), user_id: str = Depends(current_user)):
+    """Speech to text only. The UI uses this so it can show what you said before Sarjy answers,
+    then sends the text to /message like a typed message."""
+    transcript = await _transcribe_upload(audio)
+    if transcript is None:
+        return {"error": "file_too_large", "max_bytes": settings.max_upload_bytes}
+    return {"transcript": transcript}
+
+
+@router.post("/stt")
+async def stt(
+    background: BackgroundTasks,
+    conversation_id: Optional[int] = Form(None),
+    audio: UploadFile = File(...),
+    user_id: str = Depends(current_user),
+):
+    """Transcribe + reply in one request (the original endpoint, kept for API clients/tests)."""
+    transcript = await _transcribe_upload(audio)
+    if transcript is None:
+        return {"error": "file_too_large", "max_bytes": settings.max_upload_bytes}
 
     db: Session = SessionLocal()
     try:
@@ -63,6 +85,7 @@ async def stt(
         db.add(assist_msg)
         db.commit()
 
+        background.add_task(memory.remember, user_id, transcript)
         return {"transcript": transcript, "conversation_id": conv.id, "reply": reply}
     finally:
         db.close()

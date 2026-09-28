@@ -18,13 +18,15 @@ from backend.agent.state import BookingState, ConversationStateMachine
 from backend.core.logging import logger, timed
 from backend.llm.base import LLMProvider
 from backend.llm.factory import get_llm_provider
-from backend.models import BookingAttempt
+from backend.models import BookingAttempt, Message
 from backend.core.errors import ToolError
 from backend.tools.calcom.client import CalComClient
 from backend.tools.calcom.tools import BookMeetingTool, CheckAvailabilityTool, get_event_type_id
 
 _BOOK_INTENT = re.compile(
-    r"\b(book|schedule|set up)\b.{0,20}\b(meeting|call|appointment|chat)\b", re.IGNORECASE
+    r"\b(book|booking|schedule|set up|arrange)\b.{0,30}\b(meeting|call|appointment|chat|demo|sales|agent|team|someone)\b"
+    r"|\b(talk|speak) (to|with) (someone|sales|a person|your team|the team|an agent|a human)\b",
+    re.IGNORECASE,
 )
 _CONFIRM_INTENT = re.compile(
     r"\b(yes|yeah|yep|confirm|book it|go ahead|sounds good|that works|please do)\b", re.IGNORECASE
@@ -72,6 +74,16 @@ async def _extract_requested_datetime(llm: LLMProvider, message: str) -> str | N
         return None
 
 
+def _recent_history(db: Session, conversation_id: int, limit: int = 10) -> list[dict]:
+    """The last few turns of this conversation, so the LLM has short-term context too. The router
+    saves the current user message before calling the agent, so that newest row is skipped."""
+    rows = (
+        db.query(Message).filter(Message.conversation_id == conversation_id)
+        .order_by(Message.id.desc()).limit(limit + 1).all()
+    )
+    return [{"role": r.role, "content": r.content} for r in reversed(rows[1:])]
+
+
 class Agent:
     async def run_turn(
         self, db: Session, user_id: str, conversation_id: int, message: str,
@@ -103,10 +115,7 @@ class Agent:
         elif state_machine.state == BookingState.AWAITING_CONTACT:
             reply = await self._collect_contact(db, user_id, conversation_id, state_machine, message)
         else:
-            reply = await self._chat(llm, memory_context, message)
-
-        with timed("memory_extract"):
-            memory.extract_facts(db, user_id, message)
+            reply = await self._chat(llm, memory_context, message, _recent_history(db, conversation_id))
 
         booking_verified = state_machine.state == BookingState.BOOKED
         out_verdict = OutputGuardrail.check(reply, booking_verified=booking_verified)
@@ -116,11 +125,13 @@ class Agent:
 
         return reply
 
-    async def _chat(self, llm: LLMProvider, memory_context: str, message: str) -> str:
+    async def _chat(
+        self, llm: LLMProvider, memory_context: str, message: str, history: list[dict] | None = None
+    ) -> str:
         system_content = SYSTEM_PROMPT
         if memory_context:
             system_content += " " + memory_context
-        messages = [{"role": "system", "content": system_content}, {"role": "user", "content": message}]
+        messages = [{"role": "system", "content": system_content}, *(history or []), {"role": "user", "content": message}]
         with timed("llm_chat"):
             return await llm.complete(messages)
 
