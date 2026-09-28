@@ -12,9 +12,11 @@ def main():
         sys.exit(1)
     path = sys.argv[1]
     files = {"audio": open(path, "rb")}
-    data = {"user_id": "test-user", "conversation_id": ""}
+    data = {"conversation_id": ""}
     with httpx.Client(timeout=60.0) as c:
-        r = c.post("http://localhost:8000/stt", data=data, files=files)
+        login = c.post("http://localhost:8000/login", json={"username": "test-user", "password": "test-pass"})
+        headers = {"Authorization": f"Bearer {login.json()['token']}"}
+        r = c.post("http://localhost:8000/stt", data=data, files=files, headers=headers)
         print(r.status_code)
         print(r.text)
 

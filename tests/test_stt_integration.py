@@ -20,9 +20,11 @@ def test_stt_endpoint_local_file(tmp_path):
     subprocess.run(cmd, check=True)
 
     files = {"audio": open(sample, "rb")}
-    data = {"user_id": "test-user", "conversation_id": ""}
+    data = {"conversation_id": ""}
     with httpx.Client(timeout=60.0) as c:
-        r = c.post("http://localhost:8000/stt", data=data, files=files)
+        login = c.post("http://localhost:8000/login", json={"username": "test-user", "password": "test-pass"})
+        headers = {"Authorization": f"Bearer {login.json()['token']}"}
+        r = c.post("http://localhost:8000/stt", data=data, files=files, headers=headers)
         assert r.status_code == 200
         j = r.json()
         assert "transcript" in j and "conversation_id" in j

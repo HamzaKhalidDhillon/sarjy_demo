@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.core.config import settings
 from backend.core.logging import configure_logging, logger, request_id_var
 from backend.db import init_db
-from backend.routers import chat, debug, health, memory, voice
+from backend.routers import auth, chat, debug, health, memory, voice
 
 configure_logging()
 init_db()
@@ -53,6 +53,7 @@ def root():
 app.mount("/frontend", StaticFiles(directory=str(REPO_ROOT / "frontend"), html=True), name="frontend")
 
 app.include_router(health.router)
+app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(voice.router)
 app.include_router(memory.router)

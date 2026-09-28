@@ -1,14 +1,15 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from backend.db import SessionLocal
 from backend.models import Memory
+from backend.routers.auth import current_user
 
 router = APIRouter()
 
 
 @router.post("/memory/set")
-def set_memory(user_id: str, key: str, value: str):
+def set_memory(key: str, value: str, user_id: str = Depends(current_user)):
     db: Session = SessionLocal()
     try:
         mem = Memory(user_id=user_id, key=key, value=value)
@@ -21,7 +22,7 @@ def set_memory(user_id: str, key: str, value: str):
 
 
 @router.get("/memory/get")
-def get_memory(user_id: str, key: str):
+def get_memory(key: str, user_id: str = Depends(current_user)):
     db: Session = SessionLocal()
     try:
         rows = db.query(Memory).filter(Memory.user_id == user_id, Memory.key == key).all()

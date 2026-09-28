@@ -2,7 +2,7 @@ import os
 import tempfile
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
 from sqlalchemy.orm import Session
 
 from backend.agent.orchestrator import agent
@@ -10,6 +10,7 @@ from backend.core.config import settings
 from backend.core.logging import timed
 from backend.db import SessionLocal
 from backend.models import Message
+from backend.routers.auth import current_user
 from backend.routers.chat import _get_or_create_conversation
 from backend.stt.chain import SttChain
 from backend.tts.chain import TtsChain
@@ -19,9 +20,9 @@ router = APIRouter()
 
 @router.post("/stt")
 async def stt(
-    user_id: str = Form(...),
     conversation_id: Optional[int] = Form(None),
     audio: UploadFile = File(...),
+    user_id: str = Depends(current_user),
 ):
     """Accept an audio blob, transcribe it (bounded size, streamed to disk), run it through the
     agent like a typed message, and persist both turns -- same contract as before."""
@@ -68,7 +69,7 @@ async def stt(
 
 
 @router.post("/tts")
-async def tts_endpoint(text: str = Form(...)):
+async def tts_endpoint(text: str = Form(...), user_id: str = Depends(current_user)):
     if len(text) > settings.max_tts_chars:
         return {"error": "text_too_long", "max_chars": settings.max_tts_chars}
 

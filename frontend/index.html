@@ -11,8 +11,18 @@
   </head>
   <body>
     <h1>Sarjy Demo</h1>
+    <div id="login-box">
+      <p>Sign in with any username and password. First time? That creates your account.</p>
+      <input id="username" placeholder="Username" />
+      <input id="password" type="password" placeholder="Password" />
+      <button id="login">Sign in</button>
+      <span id="login-error" style="color:#b00"></span>
+    </div>
+    <div id="app" hidden>
     <div>
-      <label>User ID: <input id="user" value="demo-user" /></label>
+      Signed in as <b id="whoami"></b> <button id="logout">Sign out</button>
+    </div>
+    <div style="margin-top:0.5rem">
       <button id="start">Start Session</button>
       <span id="session">(no session)</span>
     </div>
@@ -26,20 +36,69 @@
     </div>
     <h3>Conversation</h3>
     <div id="log">(empty)</div>
+    </div>
 
     <script>
+      // --- sign in ---
+      function authHeaders(extra = {}){
+        return { ...extra, 'Authorization': `Bearer ${localStorage.getItem('sarjy_token')}` };
+      }
+
+      function showApp(){
+        const signedIn = !!localStorage.getItem('sarjy_token');
+        document.getElementById('login-box').hidden = signedIn;
+        document.getElementById('app').hidden = !signedIn;
+        document.getElementById('whoami').textContent = localStorage.getItem('sarjy_username') || '';
+      }
+
+      document.getElementById('login').onclick = async () => {
+        const res = await fetch('/login', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({
+            username: document.getElementById('username').value,
+            password: document.getElementById('password').value,
+          })
+        });
+        const j = await res.json();
+        if(!res.ok){
+          document.getElementById('login-error').textContent = j.detail || 'Sign in failed';
+          return;
+        }
+        localStorage.setItem('sarjy_token', j.token);
+        localStorage.setItem('sarjy_username', j.username);
+        document.getElementById('login-error').textContent = '';
+        showApp();
+      };
+
+      function logout(){
+        localStorage.removeItem('sarjy_token');
+        localStorage.removeItem('sarjy_username');
+        window.currentConversationId = null;
+        logEl.textContent = '(empty)';
+        document.getElementById('session').textContent = '(no session)';
+        showApp();
+      }
+      document.getElementById('logout').onclick = logout;
+
+      // fetch() wrapper: adds the token, and sends you back to sign in if it's no longer valid
+      async function api(url, options = {}){
+        const res = await fetch(url, { ...options, headers: authHeaders(options.headers || {}) });
+        if(res.status === 401){ logout(); throw new Error('signed out'); }
+        return res;
+      }
+
       const logEl = document.getElementById('log');
       const sendBtn = document.getElementById('send');
       sendBtn.onclick = async () => {
-          const user = document.getElementById('user').value;
           const msg = document.getElementById('msg').value;
           if(!msg) return;
           appendLog(`You: ${msg}`);
           const convId = window.currentConversationId || null;
-          const res = await fetch('/message', {
+          const res = await api('/message', {
             method: 'POST',
             headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({ user_id: user, conversation_id: convId, message: msg })
+            body: JSON.stringify({ conversation_id: convId, message: msg })
           });
           const j = await res.json();
           window.currentConversationId = j.conversation_id;
@@ -51,11 +110,10 @@
       };
 
       document.getElementById('start').onclick = async () => {
-        const user = document.getElementById('user').value;
-        const res = await fetch('/message', {
+        const res = await api('/message', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ user_id: user, conversation_id: null, message: 'session_start' })
+          body: JSON.stringify({ conversation_id: null, message: 'session_start' })
         });
         const j = await res.json();
         window.currentConversationId = j.conversation_id;
@@ -71,7 +129,7 @@
         // call server /tts; if returns audio bytes, play them; otherwise fallback to speechSynthesis
         const form = new FormData();
         form.append('text', text);
-        const res = await fetch('/tts', { method: 'POST', body: form });
+        const res = await api('/tts', { method: 'POST', body: form });
         const ct = res.headers.get('content-type') || '';
         if(ct.startsWith('audio/')){
           const ab = await res.arrayBuffer();
@@ -91,7 +149,7 @@
       }
 
       async function loadHistory(convId){
-        const res = await fetch(`/history?conversation_id=${convId}`);
+        const res = await api(`/history?conversation_id=${convId}`);
         const j = await res.json();
         if(j.items && j.items.length){
           // clear and re-populate
@@ -130,10 +188,9 @@
           const blob = new Blob(audioChunks, { type: 'audio/webm' });
           recStatus.textContent = '(uploading)';
           const form = new FormData();
-          form.append('user_id', document.getElementById('user').value);
           form.append('conversation_id', window.currentConversationId || '');
           form.append('audio', blob, 'audio.webm');
-          const res = await fetch('/stt', { method: 'POST', body: form });
+          const res = await api('/stt', { method: 'POST', body: form });
           const j = await res.json();
           appendLog(`Sarjy (transcript): ${j.transcript}`);
           appendLog(`Sarjy: ${j.reply}`);
@@ -146,6 +203,8 @@
         recBtn.textContent = 'Stop Recording';
         recStatus.textContent = '(recording)';
       };
+
+      showApp();
     </script>
   </body>
 </html>

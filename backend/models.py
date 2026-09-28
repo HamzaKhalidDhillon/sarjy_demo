@@ -55,3 +55,14 @@ class ConversationState(Base):
     pending_slot_start = Column(String, nullable=True)
     pending_attendee_email = Column(String, nullable=True)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class User(Base):
+    """Demo sign-in: the first login with a new username creates the account. The username is
+    what every other table stores as user_id."""
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True)
+    password_hash = Column(String)
+    token = Column(String, unique=True, index=True, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
