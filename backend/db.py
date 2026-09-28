@@ -12,8 +12,11 @@ if DATABASE_URL.startswith("sqlite:///"):
     os.makedirs(dirpath, exist_ok=True)
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
-    # Postgres (Supabase in prod). pre_ping drops connections the pooler has closed while idle
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    # Postgres (Supabase in prod). Name the driver explicitly: SQLAlchemy 2.1 switched the default
+    # for plain "postgresql://" URLs from psycopg2 to psycopg 3, which broke the first deploy.
+    # pre_ping drops connections the pooler has closed while idle.
+    url = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
+    engine = create_engine(url, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
