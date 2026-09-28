@@ -87,7 +87,7 @@ def test_slot_taken_suggests_alternatives():
     from backend.agent import templates
     reply = templates.slot_taken("2026-09-29T15:00", ["2026-09-29T16:00:00.000Z"])
     assert "isn't available" in reply
-    assert "Tuesday Sep 29 at 4:00 PM UTC" in reply
+    assert "Tuesday Sep 29: 4:00 PM (UTC)" in reply
 
 
 def test_slot_taken_with_no_alternatives_offers_another_date():

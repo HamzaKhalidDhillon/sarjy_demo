@@ -17,6 +17,7 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[int] = None
     message: str
     llm_provider: Optional[str] = None  # per-request override, e.g. "openai" | "gemini" | "offline"
+    timezone: Optional[str] = None  # the browser's IANA timezone, e.g. "Asia/Karachi"
 
 
 def _get_or_create_conversation(db: Session, user_id: str, conversation_id: Optional[int]) -> Conversation:
@@ -46,7 +47,7 @@ async def message(req: ChatRequest, background: BackgroundTasks, user_id: str = 
         db.add(user_msg)
         db.commit()
 
-        reply = await agent.run_turn(db, user_id, conv.id, req.message, req.llm_provider)
+        reply = await agent.run_turn(db, user_id, conv.id, req.message, req.llm_provider, req.timezone)
 
         assist_msg = Message(conversation_id=conv.id, role="assistant", content=reply)
         db.add(assist_msg)

@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     gemini_api_key: str = ""
     llm_provider: str = ""  # "openai" | "gemini" | "offline" | "" (auto-detect)
-    openai_chat_model: str = "gpt-3.5-turbo"
+    openai_chat_model: str = "gpt-4o-mini"
     openai_tts_model: str = "gpt-4o-mini-tts"
     gemini_model: str = "text-bison-001"
 

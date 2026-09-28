@@ -2,6 +2,7 @@
 returned by a tool call -- never freely generated -- so a confirmation can't be hallucinated.
 """
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 GUARDRAIL_REFUSAL = (
     "I can't help with that request. Let's get back to scheduling your meeting, or ask me "
@@ -13,32 +14,88 @@ NO_SLOTS_FOUND = (
 )
 
 
-def pretty_time(iso: str) -> str:
-    """'2026-09-29T15:00:00.000Z' -> 'Tuesday Sep 29 at 3:00 PM UTC', so it reads well out loud."""
+def to_local(iso: str, tz: str = "UTC") -> datetime:
+    """Parse an ISO time from Cal.com (or a naive 'YYYY-MM-DDTHH:MM' meant in the user's own
+    timezone) and convert it to the user's timezone."""
+    dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo(tz))
+    return dt.astimezone(ZoneInfo(tz))
+
+
+def _clock(dt: datetime) -> str:
+    return dt.strftime("%I:%M %p").lstrip("0")
+
+
+def pretty_time(iso: str, tz: str = "UTC") -> str:
+    """'2026-09-29T10:00:00.000Z' -> 'Tuesday Sep 29 at 3:00 PM PKT', so it reads well out loud."""
     try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        dt = to_local(iso, tz)
     except ValueError:
         return iso
-    return dt.strftime("%A %b %d at %I:%M %p").replace(" 0", " ") + " UTC"
+    return f"{dt.strftime('%A %b')} {dt.day} at {_clock(dt)} {dt.tzname()}"
 
 
-def slots_offer(slots: list[str]) -> str:
+def _grouped(slots: list[str], tz: str, days: int = 3, per_day: int = 3) -> str:
+    """'Tuesday Sep 29: 9:00 AM, 9:30 AM or 10:00 AM; Wednesday Sep 30: ...' -- much easier to
+    follow when spoken than a flat list of full dates."""
+    by_day: dict[str, list[str]] = {}
+    for slot in slots:
+        dt = to_local(slot, tz)
+        day = f"{dt.strftime('%A %b')} {dt.day}"
+        if day not in by_day and len(by_day) == days:
+            break
+        by_day.setdefault(day, [])
+        if len(by_day[day]) < per_day:
+            by_day[day].append(_clock(dt))
+    parts = []
+    for day, times in by_day.items():
+        joined = times[0] if len(times) == 1 else ", ".join(times[:-1]) + " or " + times[-1]
+        parts.append(f"{day}: {joined}")
+    zone = to_local(slots[0], tz).tzname()
+    return "; ".join(parts) + f" ({zone})"
+
+
+def slots_offer(slots: list[str], tz: str = "UTC") -> str:
     if not slots:
         return NO_SLOTS_FOUND
-    shown = ", ".join(pretty_time(s) for s in slots[:5])
-    return f"Here are some open times: {shown}. Which one works for you?"
+    return f"Here are some open times. {_grouped(slots, tz)}. Which one works for you?"
 
 
-def slot_taken(requested: str, alternatives: list[str]) -> str:
-    msg = f"Sorry, {pretty_time(requested)} isn't available."
+def slot_taken(requested: str, alternatives: list[str], tz: str = "UTC") -> str:
+    msg = f"Sorry, {pretty_time(requested, tz)} isn't available."
     if not alternatives:
         return msg + " I couldn't find any open times in the week after either. Want me to check another date?"
-    shown = ", ".join(pretty_time(s) for s in alternatives[:3])
-    return msg + f" I could do {shown} instead. Would any of those work?"
+    return msg + f" I could do {_grouped(alternatives, tz, days=2)} instead. Would any of those work?"
 
 
-def booked(start: str, uid: str) -> str:
-    return f"You're booked for {pretty_time(start)}. Confirmation reference: {uid}."
+def time_passed(alternatives: list[str], tz: str = "UTC") -> str:
+    msg = "That time has already passed."
+    if not alternatives:
+        return msg + " What day and time would work for you?"
+    return msg + f" The next open times are {_grouped(alternatives, tz, days=2)}. Would any of those work?"
+
+
+def booked(start: str, uid: str, email: str | None = None, tz: str = "UTC") -> str:
+    to = f" The confirmation is going to {email}." if email else ""
+    return f"You're booked for {pretty_time(start, tz)}.{to} Confirmation reference: {uid}."
+
+
+def only_real_booking(start: str, uid: str, tz: str = "UTC") -> str:
+    """Used when the LLM tried to claim a booking that didn't happen this turn: state the truth."""
+    return (
+        f"Yes, your call is booked for {pretty_time(start, tz)} (reference {uid}), and the "
+        "confirmation email has the video link. That's the only booking in this chat; say "
+        "'book another call' if you'd like one more."
+    )
+
+
+def holding(start: str, next_step: str, tz: str = "UTC") -> str:
+    return f"Nothing is booked yet: I'm holding {pretty_time(start, tz)} for you. {next_step}"
+
+
+def nothing_booked_yet() -> str:
+    return "I haven't booked anything yet. Tell me a day and time and I'll check the calendar."
 
 
 def booking_failed(reason: str) -> str:

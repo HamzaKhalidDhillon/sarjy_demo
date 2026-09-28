@@ -271,7 +271,7 @@
           <div class="memory-head">
             <button class="memory-close" id="memory-close" title="Close">×</button>
             <h3>What Sarjy remembers</h3>
-            <p>Saved across sessions. Tap × to make Sarjy forget something.</p>
+            <p>Facts about you, shared across all your chats. Each chat keeps its own conversation. Tap × to make Sarjy forget something.</p>
           </div>
           <ul class="memory-list" id="memory-list"></ul>
         </aside>
@@ -285,6 +285,8 @@
       const logEl = $('log');
       const messagesEl = $('messages');
       let conversationId = null;
+      // sent with every message so booking times are shown in your own timezone
+      const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
       let busy = false;
       let knownMemoryIds = new Set();
       let memoryLoaded = false;
@@ -468,7 +470,7 @@
           const res = await api('/message', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ conversation_id: conversationId, message: text }),
+            body: JSON.stringify({ conversation_id: conversationId, message: text, timezone: userTimezone }),
           });
           if (!res.ok) throw new Error('bad response');
           const j = await res.json();
@@ -701,6 +703,7 @@
         const list = $('memory-list');
         list.textContent = '';
         $('memory-count').textContent = items.length;
+        $('memory-count').hidden = items.length === 0;
         if (!items.length) {
           const li = document.createElement('li');
           li.className = 'memory-empty';
