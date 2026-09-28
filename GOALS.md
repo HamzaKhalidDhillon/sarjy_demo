@@ -161,7 +161,20 @@ turn can be broken down straight from the Render logs.
 3. The reply is spoken: the typed-message path makes a second request to `/tts` and waits for the
    full audio; the voice path uses the browser's built-in speech (instant, lower quality).
 
-**Measured**
+**Measured** (from a laptop against the live APIs, a few runs each)
+
+| Stage | Time |
+|---|---|
+| Whisper transcription (3 s clip) | ~1.4-1.8 s |
+| LLM reply (`gpt-3.5-turbo`, one sentence) | ~1.8-1.9 s warm, ~4 s first call |
+| OpenAI TTS (one sentence, full audio) | ~4-6 s, one outlier at 47 s |
+| Cal.com slot lookup | ~0.5 s warm, ~1.7 s first call |
+
+So a typed message with server-side TTS takes roughly 6-8 s to first audio, and TTS alone is more
+than half of it, because we wait for the whole audio file before playing anything. The voice
+path skips this by speaking with the browser's built-in voice (instant, lower quality). The 47 s
+outlier is also why the TTS call needs a tighter timeout with a quick fallback to browser speech.
+
 - Cal.com slot lookup: ~530 ms warm, ~1.7 s on the first call of a process (event-type lookup +
   a new TLS connection).
 - A 7-day slot lookup costs the same as a 1-day one (528 vs 533 ms), so when checking a requested
@@ -176,8 +189,9 @@ turn can be broken down straight from the Render logs.
   Open the URL once before a demo.
 
 **What we'd do next, by expected impact**
-1. Stream the LLM reply and start TTS on the first sentence, instead of waiting for the full
-   reply and the full audio. This is the biggest win for time-to-first-audio.
+1. Stream TTS audio (and the LLM reply feeding it) and start playing on the first sentence,
+   instead of waiting for the full reply and the full audio file. TTS is the biggest single
+   cost measured above, so this is the biggest win for time-to-first-audio.
 2. Reuse one HTTP client per provider (OpenAI, Cal.com) so calls skip a new TLS handshake each
    time; today every call opens a fresh connection.
 3. Stream audio to STT while the user is still talking, instead of uploading after they stop.
