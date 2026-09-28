@@ -31,8 +31,19 @@ _BOOK_INTENT = re.compile(
     re.IGNORECASE,
 )
 _CONFIRM_INTENT = re.compile(
-    r"\b(yes|yeah|yep|confirm|book it|go ahead|sounds good|that works|please do)\b", re.IGNORECASE
+    r"\b(yes|yeah|yep|yup|sure|ok|okay|perfect|absolutely|definitely|confirm|book it|go ahead|"
+    r"sounds good|that works|please do|do it)\b",
+    re.IGNORECASE,
 )
+# In a longer message a casual "ok" isn't a yes ("ok, what about tomorrow at 10?"), so longer
+# messages only count as confirming with one of these.
+_STRONG_CONFIRM = re.compile(r"\b(confirm|book it|go ahead|please do|do it)\b", re.IGNORECASE)
+
+
+def _is_confirmation(message: str) -> bool:
+    if not _CONFIRM_INTENT.search(message) or _DECLINE_INTENT.search(message):
+        return False
+    return len(message.split()) <= 6 or bool(_STRONG_CONFIRM.search(message))
 _DECLINE_INTENT = re.compile(
     r"\b(no|different time|another time|not that|actually)\b", re.IGNORECASE
 )
@@ -66,6 +77,38 @@ def _find_email(message: str) -> str | None:
         if _EMAIL.fullmatch(candidate):
             return candidate
     return None
+
+
+def _find_emails(message: str) -> list[str]:
+    """Every email in the message, typed or spoken, in order and without duplicates."""
+    found = [m.group(0).rstrip(".") for m in _EMAIL.finditer(message)]
+    if not found and _find_email(message):
+        found = [_find_email(message)]
+    return list(dict.fromkeys(e.lower() for e in found))
+
+
+def _invitees(state_machine: ConversationStateMachine) -> list[str]:
+    """Emails collected for the pending booking: the first is the attendee, the rest are guests.
+    Kept comma-separated in the existing pending_attendee_email column (no schema change)."""
+    return [e for e in (state_machine.row.pending_attendee_email or "").split(",") if e]
+
+
+def _add_invitees(state_machine: ConversationStateMachine, emails: list[str]) -> None:
+    merged = list(dict.fromkeys(_invitees(state_machine) + emails))
+    state_machine.transition(state_machine.state, pending_attendee_email=",".join(merged))
+
+
+def _saved_email(memories) -> str | None:
+    """The user's email from memory, if we have one (saved after a booking, or mentioned before)."""
+    for m in sorted(memories, key=lambda m: m.key != "email"):
+        if "email" in m.key and _EMAIL.fullmatch(m.value.strip()):
+            return m.value.strip()
+    return None
+
+
+# "yes, the same one" / "use that" -> the saved email; "also" / "too" -> saved email plus others
+_USE_SAVED = re.compile(r"\b(same|that one|that email|that address|saved|on file|use it|also|too|as well)\b", re.IGNORECASE)
+_NOT_SAVED = re.compile(r"\b(instead|rather|different|another email|other email|not that)\b", re.IGNORECASE)
 
 
 def _safe_tz(name: str | None) -> str:
@@ -193,24 +236,29 @@ class Agent:
         state_before = state_machine.state
         starting = state_before in (BookingState.IDLE, BookingState.BOOKED) and _BOOK_INTENT.search(message)
 
-        # An email can come at any point in the booking ("book a call at 3, I'm hamza@x.com")
-        email = _find_email(message)
-        if email and (starting or state_before in (BookingState.COLLECTING_TIME, BookingState.AWAITING_CONFIRMATION)):
-            state_machine.transition(state_before, pending_attendee_email=email)
+        saved_email = _saved_email(memories)
 
-        if state_before == BookingState.BOOKED and email and not starting:
+        # Emails can come at any point in the booking ("book a call at 3, I'm hamza@x.com"),
+        # and more than one: the first is the attendee, the rest are invited as guests.
+        emails = _find_emails(message)
+        if emails and (starting or state_before in (BookingState.COLLECTING_TIME, BookingState.AWAITING_CONFIRMATION)):
+            if starting:
+                state_machine.transition(state_before, pending_attendee_email=None)
+            _add_invitees(state_machine, emails)
+
+        if state_before == BookingState.BOOKED and emails and not starting:
             reply = (
-                "Your booking is already confirmed, and I can't change its email. If you'd like "
-                f"another call with the confirmation sent to {email}, just say 'book another call'."
+                "Your booking is already confirmed, and I can't change who it goes to. If you'd like "
+                f"another call with the invite sent to {templates.recipients(emails)}, just say 'book another call'."
             )
         elif starting:
             reply = await self._start_booking(llm, state_machine, message, history, tz)
         elif state_before == BookingState.COLLECTING_TIME:
             reply = await self._collect_time(llm, state_machine, message, history, memory_context, tz)
         elif state_before == BookingState.AWAITING_CONFIRMATION:
-            reply = await self._handle_confirmation(db, user_id, conversation_id, llm, state_machine, message, history, memory_context, tz)
+            reply = await self._handle_confirmation(db, user_id, conversation_id, llm, state_machine, message, history, memory_context, tz, saved_email)
         elif state_before == BookingState.AWAITING_CONTACT:
-            reply = await self._collect_contact(db, user_id, conversation_id, llm, state_machine, message, history, memory_context, tz)
+            reply = await self._collect_contact(db, user_id, conversation_id, llm, state_machine, message, history, memory_context, tz, saved_email)
         else:
             reply = await self._chat(llm, memory_context, message, history)
 
@@ -297,7 +345,7 @@ class Agent:
         without_email = _EMAIL.sub("", message) if _find_email(message) else message
         short = len(without_email.split()) <= 4 and not re.search(r"\d", without_email)
         if _find_email(message) and short:
-            return f"Thanks, I'll send the confirmation to {state_machine.row.pending_attendee_email}. Which time works for you?"
+            return f"Thanks, I'll send the invite to {templates.recipients(_invitees(state_machine))}. Which time works for you?"
         if _CONFIRM_INTENT.search(message) and short:
             return "Which of those times would you like? You can say something like 'the 9:30 one' or 'Thursday at 10'."
 
@@ -345,13 +393,13 @@ class Agent:
     async def _handle_confirmation(
         self, db: Session, user_id: str, conversation_id: int, llm: LLMProvider,
         state_machine: ConversationStateMachine, message: str, history: list[dict],
-        memory_context: str, tz: str,
+        memory_context: str, tz: str, saved_email: str | None = None,
     ) -> str:
         pending = templates.pretty_time(state_machine.row.pending_slot_start, tz)
-        confirmed = _CONFIRM_INTENT.search(message) and not _DECLINE_INTENT.search(message)
+        confirmed = _is_confirmation(message)
 
         if not confirmed and _find_email(message) and not _ISO_DATETIME.search(message):
-            return f"Thanks, I'll send the confirmation to {state_machine.row.pending_attendee_email}. Shall I book {pending}?"
+            return f"Thanks, I'll send the invite to {templates.recipients(_invitees(state_machine))}. Shall I book {pending}?"
 
         if not confirmed:
             # "actually make it 11am instead" -> check the new time right away
@@ -369,28 +417,38 @@ class Agent:
                 f"I still have {pending} ready for you. Say 'yes' to book it, or 'never mind' to drop it.",
             )
 
-        if not state_machine.row.pending_attendee_email:
+        if not _invitees(state_machine):
             state_machine.transition(BookingState.AWAITING_CONTACT)
-            return "What email should I send the confirmation to?"
+            if saved_email:
+                return templates.ask_which_email(saved_email)
+            return templates.ask_for_email()
 
         return await self._create_booking(db, user_id, conversation_id, state_machine, tz)
 
     async def _collect_contact(
         self, db: Session, user_id: str, conversation_id: int, llm: LLMProvider,
         state_machine: ConversationStateMachine, message: str, history: list[dict],
-        memory_context: str, tz: str,
+        memory_context: str, tz: str, saved_email: str | None = None,
     ) -> str:
-        email = _find_email(message)
-        if email:
-            state_machine.transition(BookingState.AWAITING_CONFIRMATION, pending_attendee_email=email)
+        emails = _find_emails(message)
+        # "yes" / "the same one" / "and also sam@x.com" -> include the email we have on file
+        if saved_email and not _NOT_SAVED.search(message) and (
+            (_CONFIRM_INTENT.search(message) and not _DECLINE_INTENT.search(message)) or _USE_SAVED.search(message)
+        ):
+            emails = [saved_email] + emails
+        if emails:
+            _add_invitees(state_machine, emails)
+            state_machine.transition(BookingState.AWAITING_CONFIRMATION)
             return await self._create_booking(db, user_id, conversation_id, state_machine, tz)
 
+        if saved_email and _DECLINE_INTENT.search(message):
+            return "No problem -- which email should I send the invite to instead?"
         if "@" in message or re.search(r"\b(email|mail|gmail|outlook)\b", message, re.IGNORECASE):
             return "That doesn't look like a complete email address -- could you say or type it again?"
         pending = templates.pretty_time(state_machine.row.pending_slot_start, tz)
         return await self._answer_and_nudge(
             llm, memory_context, message, history,
-            f"To finish booking {pending}, I just need your email address.",
+            f"To finish booking {pending}, I just need an email address for the invite.",
         )
 
     async def _create_booking(
@@ -402,7 +460,8 @@ class Agent:
             event_type_id = await get_event_type_id(CalComClient())
         except ToolError as exc:
             return templates.booking_failed(str(exc))
-        attendee_email = state_machine.row.pending_attendee_email
+        invitees = _invitees(state_machine)
+        attendee_email, guests = invitees[0], invitees[1:]
         idem_key = _idempotency_key(conversation_id, event_type_id, start)
 
         attempt = db.query(BookingAttempt).filter(BookingAttempt.idempotency_key == idem_key).first()
@@ -411,7 +470,7 @@ class Agent:
                 BookingState.BOOKED, pending_slot_start=None, pending_event_type_id=None,
                 pending_attendee_email=None,
             )
-            return templates.booked(start, attempt.calcom_booking_uid, attendee_email, tz)
+            return templates.booked(start, attempt.calcom_booking_uid, invitees, tz)
 
         if not attempt:
             attempt = BookingAttempt(
@@ -425,7 +484,7 @@ class Agent:
         with timed("tool_call:book_meeting"):
             result = await BookMeetingTool().run(
                 start=start, attendee_name=user_id, attendee_timezone=tz,
-                attendee_email=attendee_email,
+                attendee_email=attendee_email, guests=guests,
             )
 
         if result.ok:
@@ -433,11 +492,12 @@ class Agent:
             attempt.calcom_booking_uid = result.data.get("uid")
             attempt.calcom_booking_id = result.data.get("id")
             db.commit()
+            memory._upsert(db, user_id, "email", attendee_email)  # offered next time
             state_machine.transition(
                 BookingState.BOOKED, pending_slot_start=None, pending_event_type_id=None,
                 pending_attendee_email=None,
             )
-            return templates.booked(start, attempt.calcom_booking_uid, attendee_email, tz)
+            return templates.booked(start, attempt.calcom_booking_uid, invitees, tz)
 
         if result.ambiguous:
             # Left as "pending" on purpose -- a future turn/GET-bookings check can reconcile this

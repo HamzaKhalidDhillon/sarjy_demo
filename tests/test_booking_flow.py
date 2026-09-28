@@ -12,6 +12,7 @@ from backend.models import Conversation, Message
 from backend.tools.base import ToolResult
 
 SLOT = "2099-01-05T10:00:00.000Z"
+SLOT_2 = "2099-01-06T10:00:00.000Z"
 
 
 class ScriptedLLM:
@@ -26,11 +27,14 @@ class ScriptedLLM:
 
 class FakeAvailability:
     async def run(self, start_date, end_date, timezone="UTC", **_):
-        return ToolResult(ok=True, data={"slots": [SLOT]})
+        return ToolResult(ok=True, data={"slots": [SLOT, SLOT_2]})
 
 
 class FakeBooking:
-    async def run(self, **_):
+    calls: list[dict] = []
+
+    async def run(self, **kwargs):
+        FakeBooking.calls.append(kwargs)
         return ToolResult(ok=True, data={"uid": "REAL-UID", "id": 1})
 
 
@@ -39,6 +43,7 @@ def chat(monkeypatch):
     """Returns say(message, llm) -> reply, running one turn the way the /message router does."""
     monkeypatch.setattr(orchestrator, "CheckAvailabilityTool", FakeAvailability)
     monkeypatch.setattr(orchestrator, "BookMeetingTool", FakeBooking)
+    FakeBooking.calls = []
 
     async def event_type_id(client):
         return 1
@@ -130,3 +135,42 @@ def test_times_are_shown_in_the_users_timezone_grouped_by_day():
     slots = ["2099-01-05T04:00:00.000Z", "2099-01-05T04:30:00.000Z", "2099-01-06T04:00:00.000Z"]
     text = templates.slots_offer(slots, "Asia/Karachi")
     assert "Monday Jan 5: 9:00 AM or 9:30 AM; Tuesday Jan 6: 9:00 AM (PKT)" in text
+
+
+@pytest.mark.asyncio
+async def test_saved_email_is_offered_next_time_and_guests_can_be_added(chat):
+    await chat("book a call 2099-01-05 10:00")
+    assert "What email should I send the invite to?" in await chat("yes")
+    await chat("hamza@example.com")  # first booking -> email saved to memory
+
+    await chat("book another call 2099-01-06 10:00")
+    ask = await chat("yes")
+    assert "hamza@example.com, the email I have on file" in ask
+
+    booked = await chat("yes, and also invite support@example.com")
+    assert FakeBooking.calls[-1]["attendee_email"] == "hamza@example.com"
+    assert FakeBooking.calls[-1]["guests"] == ["support@example.com"]
+    assert "hamza@example.com and support@example.com" in booked
+
+
+@pytest.mark.asyncio
+async def test_a_different_email_replaces_the_saved_one(chat):
+    await chat("book a call 2099-01-05 10:00")
+    await chat("yes")
+    await chat("hamza@example.com")
+
+    await chat("book another call 2099-01-06 10:00")
+    await chat("yes")
+    await chat("use a different one: other@example.com")
+    assert FakeBooking.calls[-1]["attendee_email"] == "other@example.com"
+    assert FakeBooking.calls[-1]["guests"] == []
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("yes", True), ("sure", True), ("ok, book it", True), ("perfect", True),
+    ("yes please go ahead and book that one for me today", True),
+    ("ok what about tomorrow at 10am instead", False),
+    ("no", False), ("yes, actually no", False),
+])
+def test_what_counts_as_a_yes(text, expected):
+    assert orchestrator._is_confirmation(text) == expected

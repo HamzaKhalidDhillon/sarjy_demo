@@ -19,7 +19,7 @@ class FakeCalComClient:
             raise ToolError("boom")
         return self._slots
 
-    async def create_booking(self, event_type_id, start, attendee_name, attendee_timezone, attendee_email=None):
+    async def create_booking(self, event_type_id, start, attendee_name, attendee_timezone, attendee_email=None, guests=None):
         if self._raise_tool_error:
             raise ToolError("Cal.com create_booking failed: 409 slot taken")
         if self._raise_network_error:

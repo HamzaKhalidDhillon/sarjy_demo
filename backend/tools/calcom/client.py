@@ -66,7 +66,7 @@ class CalComClient:
 
     async def create_booking(
         self, event_type_id: int, start: str, attendee_name: str, attendee_timezone: str,
-        attendee_email: str | None = None,
+        attendee_email: str | None = None, guests: list[str] | None = None,
     ) -> dict:
         """Never blindly retried: a retried write could double-book. Callers that need retry-safety
         must use the idempotency-key + BookingAttempt reconciliation flow in agent/orchestrator.py,
@@ -78,6 +78,8 @@ class CalComClient:
         if attendee_email:
             attendee["email"] = attendee_email
         payload = {"eventTypeId": event_type_id, "start": start, "attendee": attendee}
+        if guests:
+            payload["guests"] = guests  # Cal.com emails the invite to these people too
         async with httpx.AsyncClient(timeout=20.0) as client:
             response = await request_with_retry(
                 client, "POST", url, json=payload, max_attempts=1,

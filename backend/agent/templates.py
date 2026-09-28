@@ -76,9 +76,28 @@ def time_passed(alternatives: list[str], tz: str = "UTC") -> str:
     return msg + f" The next open times are {_grouped(alternatives, tz, days=2)}. Would any of those work?"
 
 
-def booked(start: str, uid: str, email: str | None = None, tz: str = "UTC") -> str:
-    to = f" The confirmation is going to {email}." if email else ""
+def recipients(emails: list[str]) -> str:
+    """['a', 'b', 'c'] -> 'a, b and c'"""
+    return emails[0] if len(emails) == 1 else ", ".join(emails[:-1]) + " and " + emails[-1]
+
+
+def booked(start: str, uid: str, emails: list[str] | None = None, tz: str = "UTC") -> str:
+    to = f" The invite is going to {recipients(emails)}." if emails else ""
     return f"You're booked for {pretty_time(start, tz)}.{to} Confirmation reference: {uid}."
+
+
+def ask_which_email(saved: str) -> str:
+    return (
+        f"Should I send the invite to {saved}, the email I have on file, or a different one? "
+        "You can also add someone else, like a colleague."
+    )
+
+
+def ask_for_email() -> str:
+    return (
+        "What email should I send the invite to? You can give more than one if someone else "
+        "should join, like a colleague."
+    )
 
 
 def only_real_booking(start: str, uid: str, tz: str = "UTC") -> str:

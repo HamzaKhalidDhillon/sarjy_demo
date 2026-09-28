@@ -62,6 +62,7 @@ class BookMeetingTool(Tool):
             "attendee_name": {"type": "string"},
             "attendee_timezone": {"type": "string"},
             "attendee_email": {"type": "string"},
+            "guests": {"type": "array", "items": {"type": "string"}, "description": "More emails to invite"},
         },
         "required": ["start", "attendee_name", "attendee_timezone"],
     }
@@ -71,12 +72,12 @@ class BookMeetingTool(Tool):
 
     async def run(
         self, start: str, attendee_name: str, attendee_timezone: str,
-        attendee_email: str | None = None, **_,
+        attendee_email: str | None = None, guests: list[str] | None = None, **_,
     ) -> ToolResult:
         try:
             event_type_id = await get_event_type_id(self.client)
             data = await self.client.create_booking(
-                event_type_id, start, attendee_name, attendee_timezone, attendee_email
+                event_type_id, start, attendee_name, attendee_timezone, attendee_email, guests
             )
         except ToolError as exc:
             # A definite response came back from Cal.com and it was an error -- not ambiguous.
