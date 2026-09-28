@@ -129,6 +129,9 @@ important ones into regression tests (`tests/test_booking_flow.py`).
 | "Is my meeting booked?" (after a real booking) | "Yes, ... reference ..." from our records | ❌ → ✅ |
 | "Book it again" / "yes" after a booking | **First run: the LLM claimed "I've booked another call… reference TEST-3" (nothing was booked).** Now: a booking only counts in the turn Cal.com confirms it; any other claim is replaced with the facts | ❌ → ✅ |
 
+The Cal.com side was also verified against the real API: a booking with a guest, rescheduling it
+(the guest carried over, with Cal.com linking the new booking to the old one), and cancelling it.
+
 Sarjy only knows about calls booked through it (our own records); a call booked directly on the
 Cal.com page wouldn't show up. Reading those too via Cal.com's bookings API is a natural next step.
 
