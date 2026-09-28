@@ -5,13 +5,10 @@ services:
     dockerfilePath: backend/Dockerfile
     dockerContext: .
     plan: free
+    region: singapore  # same region as the Supabase project (ap-southeast-1)
     healthCheckPath: /health
     envVars:
       - key: OPENAI_API_KEY
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: LLM_PROVIDER
         sync: false
       - key: CALCOM_API_KEY
         sync: false
