@@ -5,5 +5,4 @@ __pycache__/
 data/
 backend/.env
 .env
-.claude/settings.local.json
 tests/.test_data/

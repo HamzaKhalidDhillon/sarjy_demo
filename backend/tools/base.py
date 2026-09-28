@@ -1,6 +1,5 @@
-"""Tool contract. Deliberately shaped like an MCP tool (name, description, JSON-schema
-parameters, async run()) so a real MCP server/client could wrap this registry later without
-changing how the agent calls tools.
+"""Tool contract, shaped like an MCP tool (name, description, JSON-schema parameters, async
+run()) so the Cal.com tools could be exposed through an MCP server without changing them.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field

@@ -1,7 +1,6 @@
 # Sarjy: Goals & Decisions
 
-This is the working plan for the Sarj take-home (`instruction.md`), kept up to date as we build.
-It's meant to double as the seed for the write-up the brief asks for.
+Decisions and write-up for the Sarj take-home (the brief is in `instruction.md`).
 
 ## What the assignment requires
 
@@ -26,7 +25,7 @@ for this kind of assistant. Concretely, we built:
   unless Cal.com's API actually returned a real booking id that turn -- see
   `agent/templates.py` and `agent/guardrails.py::OutputGuardrail`.
 - An idempotency key on booking confirmations so a retried "yes, book it" can't double-book.
-- A retry/backoff helper shared by every external call (OpenAI, Gemini, Cal.com), with booking
+- A retry/backoff helper shared by every external call (OpenAI, Cal.com), with booking
   *creation* specifically excluded from blind retries (a retried write could double-book) --
   ambiguous outcomes are reconciled instead of guessed at.
 
@@ -79,7 +78,7 @@ cleanup. Two things only live testing caught, now fixed:
   one contact method"), even though the docs summary we started from said name+timezone were
   sufficient. The booking flow now has an explicit `awaiting_contact` state that asks for an
   email before ever calling `create_booking` -- see `agent/state.py`'s `BookingState` and
-  `agent/orchestrator.py::_collect_contact`.
+  `agent/booking_flow.py` (`BookingFlow.collect_contact`).
 
 ### Memory: cross-session recall
 
@@ -136,8 +135,8 @@ addresses used for bookings), so security was treated as part of the reliability
   editing a request can't make you someone else.
 - **Ownership checks**: a conversation can only be continued or read by the user who owns it
   (`/message`, `/history`; covered by `tests/test_auth.py`).
-- **Cost abuse**: every endpoint that spends provider credits (`/stt`, `/tts`, `/message`,
-  `/gemini_test`) requires sign-in, so an open URL can't be used to drain API keys.
+- **Cost abuse**: every endpoint that spends provider credits (`/transcribe`, `/tts`,
+  `/message`) requires sign-in, so an open URL can't be used to drain API keys.
 - **Supabase Row Level Security** is switched on for every table at startup. Supabase serves the
   `public` schema through its REST API using the anon key; with RLS on and no policies, that API
   sees nothing, while the backend (connecting as the table owner) is unaffected.
@@ -180,7 +179,7 @@ turn can be broken down straight from the Render logs.
 | Stage | Time |
 |---|---|
 | Whisper transcription (3 s clip) | ~1.4-1.8 s |
-| LLM reply (`gpt-3.5-turbo`, one sentence) | ~1.8-1.9 s warm, ~4 s first call |
+| LLM reply (`gpt-3.5-turbo` at the time; now `gpt-4o-mini`) | ~1.8-1.9 s warm, ~4 s first call |
 | OpenAI TTS (one sentence, full audio) | ~4-6 s, one outlier at 47 s |
 | Cal.com slot lookup | ~0.5 s warm, ~1.7 s first call |
 
@@ -223,12 +222,11 @@ memory, hence an external database.
 
 ## Architecture
 
-See `ARCHITECTURE.md` for the detailed flow and design patterns. Summary: modular
-provider/tool/agent structure under `backend/`, with `llm/factory.py` as the "pick a model at
-runtime" file the project was reorganized around, `tools/calcom/` as the one external
-side-effecting tool (shaped MCP-tool-compatible for an easy future swap), and
-`agent/orchestrator.py` running guardrails -> memory -> (chat | booking state machine) -> output
-guardrail for every turn.
+See `ARCHITECTURE.md` (a turn step by step, and the booking state machine) and the "Project
+structure" section of the README. In short: providers behind small interfaces (`llm/`, `stt/`,
+`tts/`), Cal.com as MCP-shaped tools (`tools/calcom/`), and in `agent/` an orchestrator that runs
+guardrails and memory and hands each message to `BookingFlow` or `ChangeFlow` depending on the
+conversation's state.
 
 ## Future work (explicitly out of scope for this pass)
 
@@ -241,12 +239,13 @@ guardrail for every turn.
   setup for this scope.
 - **Production-grade auth** -- the sign-in above is deliberately minimal; see "Data security"
   for what we'd add.
-- **Alembic migrations** -- `Base.metadata.create_all()` is fine for two new tables at this scale.
+- **Alembic migrations** -- `create_all()` plus adding missing nullable columns at startup
+  (`db.py`) is enough for this schema; a real migration tool would come with more changes.
+- **Streaming speech** -- start playing the reply on its first sentence (see "Latency").
+- **Bookings made outside Sarjy** -- Sarjy knows the calls it booked; reading the rest from
+  Cal.com's bookings API would let it cancel or move those too.
 - **LLM-based moderation as the primary guardrail** -- deterministic regex/keyword checks are
   the primary layer; an LLM classifier behind a flag would be a reasonable second pass.
 - **Booking reconciliation via a real Cal.com `GET /bookings` lookup** -- ambiguous
   (network-timeout) booking attempts currently stay `pending` and ask the user to retry rather
   than being automatically reconciled against Cal.com's own record.
-- **Security note**: `backend/.env.example` previously had a real Gemini API key checked in by
-  mistake -- it's been blanked, but that key should be rotated in Google AI Studio since it was
-  exposed.

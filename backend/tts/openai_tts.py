@@ -13,8 +13,6 @@ class OpenAITTS(TtsProvider):
             return None
         url = "https://api.openai.com/v1/audio/speech"
         headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
-        # Fix for a real bug in the original adapter: OpenAI's speech endpoint requires "input",
-        # not "text" -- the old payload silently failed with a 400 that was swallowed.
         payload = {
             "model": settings.openai_tts_model,
             "input": text,

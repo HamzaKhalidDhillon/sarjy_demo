@@ -1,13 +1,9 @@
-"""Deterministic guardrails: fast, testable, zero added LLM cost/latency. An LLM-based
-moderation pass behind a feature flag is a reasonable future addition, not required here.
-"""
+"""Deterministic guardrails: fast, testable, and no extra LLM cost or latency."""
 import re
 from dataclasses import dataclass
 
-# Sent as the system message on every LLM call. This is the second guardrail layer: the regex
-# checks below catch known bad patterns, but a jailbreak worded in a way the regex doesn't
-# recognize would otherwise reach the model with no rules at all. The last line is the important
-# part -- it tells the model the user's words are input to respond to, not new instructions.
+# The system message on every LLM call: the second guardrail layer, for jailbreaks the patterns
+# below don't recognise. The last line tells the model the user's words are input, not rules.
 SYSTEM_PROMPT = (
     "You are Sarjy, a voice assistant that helps people set up a quick intro chat with our team. "
     "Be helpful and concise; your replies are spoken aloud, so keep them to a few sentences. "
@@ -43,8 +39,7 @@ PROHIBITED_TOPICS = [
     "credit card number generator",
 ]
 
-# Booking-outcome language the LLM must never be allowed to say unless the orchestrator has
-# explicitly verified a real Cal.com success for this turn.
+# Booking outcomes the LLM may only state in the turn Cal.com actually confirmed one
 BOOKING_CLAIM_PATTERNS = [
     r"\b(is|has been|was) (booked|confirmed|scheduled)\b",
     r"\byou'?re (all )?(booked|confirmed|set)\b",

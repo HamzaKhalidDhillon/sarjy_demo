@@ -7,11 +7,9 @@ from pydantic import BaseSettings
 class Settings(BaseSettings):
     # LLM providers
     openai_api_key: str = ""
-    gemini_api_key: str = ""
-    llm_provider: str = ""  # "openai" | "gemini" | "offline" | "" (auto-detect)
+    llm_provider: str = ""  # "openai" | "offline" | "" (auto-detect)
     openai_chat_model: str = "gpt-4o-mini"
     openai_tts_model: str = "gpt-4o-mini-tts"
-    gemini_model: str = "text-bison-001"
 
     # STT
     use_local_whisper: bool = False
@@ -26,9 +24,8 @@ class Settings(BaseSettings):
     calcom_api_key: str = ""
     calcom_username: str = ""
     calcom_event_type_id: int = 0
-    # Cal.com versions its API per-endpoint via this header. Both defaults below are confirmed
-    # working against the live API (get_slots and a real create_booking + cancel_booking round
-    # trip) -- override via .env only if Cal.com changes them in the future.
+    # Cal.com versions its API per endpoint with a cal-api-version header; override in .env if
+    # they change
     calcom_api_version_slots: str = "2024-09-04"
     calcom_api_version_bookings: str = "2026-02-25"
     calcom_base_url: str = "https://api.cal.com/v2"

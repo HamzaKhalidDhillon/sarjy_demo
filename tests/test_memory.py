@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from backend.agent import memory
-from backend.agent.orchestrator import _BOOK_INTENT
+from backend.agent.parsing import BOOK_INTENT
 from backend.db import SessionLocal
 from backend.main import app
 
@@ -22,7 +22,7 @@ def _client():
     ("what's my favorite color?", False),
 ])
 def test_booking_triggers(text, expected):
-    assert bool(_BOOK_INTENT.search(text)) == expected
+    assert bool(BOOK_INTENT.search(text)) == expected
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,8 @@ import uuid
 import pytest
 
 import backend.agent.orchestrator as orchestrator
+import backend.tools.calcom.tools as calcom_tools
+from backend.agent import parsing
 from backend.agent import templates
 from backend.db import SessionLocal
 from backend.models import Conversation, Message
@@ -54,17 +56,17 @@ class FakeBooking:
 @pytest.fixture
 def chat(monkeypatch):
     """Returns say(message, llm) -> reply, running one turn the way the /message router does."""
-    monkeypatch.setattr(orchestrator, "CheckAvailabilityTool", FakeAvailability)
-    monkeypatch.setattr(orchestrator, "BookMeetingTool", FakeBooking)
-    monkeypatch.setattr(orchestrator, "CancelMeetingTool", FakeCancel)
-    monkeypatch.setattr(orchestrator, "RescheduleMeetingTool", FakeReschedule)
+    monkeypatch.setattr(calcom_tools, "CheckAvailabilityTool", FakeAvailability)
+    monkeypatch.setattr(calcom_tools, "BookMeetingTool", FakeBooking)
+    monkeypatch.setattr(calcom_tools, "CancelMeetingTool", FakeCancel)
+    monkeypatch.setattr(calcom_tools, "RescheduleMeetingTool", FakeReschedule)
     FakeBooking.calls = []
     FakeCancel.calls = []
 
     async def event_type_id(client):
         return 1
 
-    monkeypatch.setattr(orchestrator, "get_event_type_id", event_type_id)
+    monkeypatch.setattr(calcom_tools, "get_event_type_id", event_type_id)
 
     db = SessionLocal()
     user = f"u-{uuid.uuid4().hex[:8]}"
@@ -127,14 +129,14 @@ async def test_blocked_message_gets_the_refusal(chat):
 async def test_timezone_conversion_happens_in_code_not_in_the_llm():
     # Seen live: gpt-3.5 turned "11am UTC" into "2026-09-29T4:00" for a user in Pakistan.
     utc = ScriptedLLM('{"date": "2099-01-05", "time": "10:00", "timezone": "UTC"}')
-    assert (await orchestrator._read_requested_time(utc, "10am UTC", [], "Asia/Karachi")).exact == "2099-01-05T15:00"
+    assert (await parsing.read_requested_time(utc, "10am UTC", [], "Asia/Karachi")).exact == "2099-01-05T15:00"
 
     # "PKT" isn't an IANA name: the model is echoing Sarjy's own message, so it's the user's zone
     pkt = ScriptedLLM('{"date": "2099-01-05", "time": "9:00", "timezone": "PKT"}')
-    assert (await orchestrator._read_requested_time(pkt, "the first one", [], "Asia/Karachi")).exact == "2099-01-05T09:00"
+    assert (await parsing.read_requested_time(pkt, "the first one", [], "Asia/Karachi")).exact == "2099-01-05T09:00"
 
     junk = ScriptedLLM("sure! 10am works")
-    assert await orchestrator._read_requested_time(junk, "10am", [], "UTC") == orchestrator.TimeAsk()
+    assert await parsing.read_requested_time(junk, "10am", [], "UTC") == parsing.TimeAsk()
 
 
 @pytest.mark.parametrize("text,email", [
@@ -144,7 +146,7 @@ async def test_timezone_conversion_happens_in_code_not_in_the_llm():
     ("meet me at noon at the office", None),
 ])
 def test_spoken_and_typed_emails(text, email):
-    assert orchestrator._find_email(text) == email
+    assert parsing.find_email(text) == email
 
 
 def test_times_are_shown_in_the_users_timezone_grouped_by_day():
@@ -189,7 +191,7 @@ async def test_a_different_email_replaces_the_saved_one(chat):
     ("no", False), ("yes, actually no", False),
 ])
 def test_what_counts_as_a_yes(text, expected):
-    assert orchestrator._is_confirmation(text) == expected
+    assert parsing.is_confirmation(text) == expected
 
 
 async def _book(chat, when="2099-01-05 10:00"):

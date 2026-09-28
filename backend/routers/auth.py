@@ -6,10 +6,11 @@ import hashlib
 import secrets
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from backend.db import SessionLocal
+from backend.db import get_db
 from backend.models import User
 
 router = APIRouter()
@@ -30,40 +31,30 @@ def _check_password(password: str, stored: str) -> bool:
 
 
 @router.post("/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, db: Session = Depends(get_db)):
     username = req.username.strip().lower()
     if not username or len(req.password) < 4:
         raise HTTPException(400, "Username is required and password must be at least 4 characters")
 
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.username == username).first()
-        if not user:
-            salt = secrets.token_hex(16)
-            user = User(username=username, password_hash=f"{salt}${_hash_password(req.password, salt)}")
-            db.add(user)
-        elif not _check_password(req.password, user.password_hash):
-            raise HTTPException(401, "Wrong password for that username")
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        salt = secrets.token_hex(16)
+        user = User(username=username, password_hash=f"{salt}${_hash_password(req.password, salt)}")
+        db.add(user)
+    elif not _check_password(req.password, user.password_hash):
+        raise HTTPException(401, "Wrong password for that username")
 
-        # Reuse the existing token so signing in on a second device doesn't log out the first
-        if not user.token:
-            user.token = secrets.token_urlsafe(32)
-        db.commit()
-        return {"username": user.username, "token": user.token}
-    finally:
-        db.close()
+    # Reuse the existing token so signing in on a second device doesn't log out the first
+    if not user.token:
+        user.token = secrets.token_urlsafe(32)
+    db.commit()
+    return {"username": user.username, "token": user.token}
 
 
-def current_user(authorization: Optional[str] = Header(None)) -> str:
+def current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> str:
     """FastAPI dependency: 'Bearer <token>' -> username (used as user_id everywhere)."""
     token = (authorization or "").removeprefix("Bearer ").strip()
-    if not token:
+    user = db.query(User).filter(User.token == token).first() if token else None
+    if not user:
         raise HTTPException(401, "Not signed in")
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.token == token).first()
-        if not user:
-            raise HTTPException(401, "Not signed in")
-        return user.username
-    finally:
-        db.close()
+    return user.username

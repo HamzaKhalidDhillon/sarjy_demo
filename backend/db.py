@@ -12,13 +12,21 @@ if DATABASE_URL.startswith("sqlite:///"):
     os.makedirs(dirpath, exist_ok=True)
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
-    # Postgres (Supabase in prod). Name the driver explicitly: SQLAlchemy 2.1 switched the default
-    # for plain "postgresql://" URLs from psycopg2 to psycopg 3, which broke the first deploy.
-    # pre_ping drops connections the pooler has closed while idle.
+    # Postgres (Supabase in prod). The driver is named explicitly because SQLAlchemy 2.1 maps a
+    # plain "postgresql://" URL to psycopg 3; pre_ping drops connections the pooler closed.
     url = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
     engine = create_engine(url, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def get_db():
+    """FastAPI dependency: one database session per request, always closed afterwards."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def _add_missing_columns():

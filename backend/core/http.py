@@ -1,4 +1,4 @@
-"""Shared retry/backoff helper for all outbound HTTP calls (OpenAI, Gemini, Cal.com).
+"""Shared retry/backoff helper for all outbound HTTP calls (OpenAI, Cal.com).
 
 Kept dependency-light: httpx + stdlib only, no tenacity/backoff package.
 """

@@ -86,6 +86,13 @@ def booked(start: str, uid: str, emails: list[str] | None = None, tz: str = "UTC
     return f"You're booked for {pretty_time(start, tz)}.{to} Confirmation reference: {uid}."
 
 
+def already_booked_email(emails: list[str]) -> str:
+    return (
+        "Your booking is already confirmed, and I can't change who it goes to. If you'd like another "
+        f"call with the invite sent to {recipients(emails)}, just say 'book another call'."
+    )
+
+
 def ask_which_email(saved: str) -> str:
     return (
         f"Should I send the invite to {saved}, the email I have on file, or a different one? "

@@ -1,11 +1,7 @@
-"""Cross-session memory: recall() feeds known facts into the LLM context before a reply is
-generated, remember() pulls new facts out of the user's message afterward. This is what makes
-"what's my favorite color?" work across sessions.
-
-remember() asks the LLM to pick out the facts (people say "this is Hamza" or "I'm into sushi",
-which no fixed pattern list catches), and falls back to the regex patterns below when there's no
-LLM or its output isn't usable. It runs as a background task after the reply has been sent, so
-it adds no latency for the user.
+"""Cross-session memory. recall() loads the user's facts into the LLM context before each
+reply; remember() picks new facts out of a message afterwards, as a background task so it adds
+no latency. The LLM does the picking (people say "this is Hamza" or "I'm into sushi", which fixed
+patterns miss); the regex patterns below are the fallback when there's no LLM.
 """
 import json
 import re
@@ -13,6 +9,7 @@ import re
 from sqlalchemy.orm import Session
 
 from backend.agent.guardrails import InputGuardrail
+from backend.agent.parsing import EMAIL
 from backend.core.logging import logger, timed
 from backend.db import SessionLocal
 from backend.llm.factory import get_llm_provider
@@ -33,6 +30,15 @@ def recall(db: Session, user_id: str) -> list[Memory]:
     return db.query(Memory).filter(Memory.user_id == user_id).all()
 
 
+def saved_email(memories: list[Memory]) -> str | None:
+    """The user's email, if we have one (saved after a booking, or mentioned before)."""
+    for m in sorted(memories, key=lambda m: m.key != "email"):
+        value = m.value.strip()
+        if "email" in m.key and EMAIL.fullmatch(value):
+            return value
+    return None
+
+
 def format_memories_for_prompt(memories: list[Memory]) -> str:
     if not memories:
         return ""
@@ -40,7 +46,7 @@ def format_memories_for_prompt(memories: list[Memory]) -> str:
     return f"Known facts about this user from previous sessions: {facts}."
 
 
-def _upsert(db: Session, user_id: str, key: str, value: str) -> None:
+def save_fact(db: Session, user_id: str, key: str, value: str) -> None:
     existing = db.query(Memory).filter(Memory.user_id == user_id, Memory.key == key).first()
     if existing:
         existing.value = value
@@ -65,7 +71,7 @@ def extract_facts(db: Session, user_id: str, user_message: str) -> list[str]:
             key = key_template
             value = groups[0].strip()
         if value:
-            _upsert(db, user_id, key, value)
+            save_fact(db, user_id, key, value)
             written.append(key)
     return written
 
@@ -109,7 +115,7 @@ async def remember(user_id: str, user_message: str) -> list[str]:
                 value = ", ".join(str(v) for v in value)
             value = str(value).strip()[:200]
             if _KEY.match(str(key)) and value and known.get(key) != value:
-                _upsert(db, user_id, key, value)
+                save_fact(db, user_id, key, value)
                 written.append(key)
         if written:
             logger.info("memory saved keys=%s", written)

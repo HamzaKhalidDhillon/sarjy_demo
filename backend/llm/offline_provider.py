@@ -2,7 +2,7 @@ from backend.llm.base import LLMProvider
 
 
 class OfflineEchoProvider(LLMProvider):
-    """Deterministic fallback used when no provider key is configured or all providers fail."""
+    """Deterministic stand-in used when no LLM API key is configured (local runs and tests)."""
 
     name = "offline"
 

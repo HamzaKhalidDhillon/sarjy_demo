@@ -9,7 +9,6 @@ services:
     environment:
       - DATABASE_URL=sqlite:///./data/data.db
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LLM_PROVIDER=${LLM_PROVIDER}
       - CALCOM_API_KEY=${CALCOM_API_KEY}
       - CALCOM_USERNAME=${CALCOM_USERNAME}

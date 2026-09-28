@@ -34,9 +34,8 @@ class CalComClient:
             raise ToolError("Cal.com is not configured: set CALCOM_API_KEY in .env")
 
     async def get_event_types(self) -> list[dict]:
-        # Verified live: this endpoint 404s if a cal-api-version header is sent at all (unlike
-        # slots/bookings, which require one) -- it just returns the authenticated key's own
-        # event types, ignoring `username` as a filter.
+        # Unlike slots/bookings, this endpoint 404s if a cal-api-version header is sent. It
+        # returns the API key owner's event types (`username` doesn't filter).
         self._ensure_configured()
         url = f"{self.base_url}/event-types"
         params = {"username": settings.calcom_username} if settings.calcom_username else {}
@@ -46,7 +45,7 @@ class CalComClient:
             )
         if response.status_code >= 400:
             raise ToolError(f"Cal.com get_event_types failed: {response.status_code} {response.text}")
-        # Verified live shape: data.eventTypeGroups[*].eventTypes[*] -- NOT a flat data list.
+        # Shape: data.eventTypeGroups[*].eventTypes[*], not a flat list
         groups = response.json().get("data", {}).get("eventTypeGroups", [])
         return [et for group in groups for et in group.get("eventTypes", [])]
 
@@ -69,7 +68,7 @@ class CalComClient:
         attendee_email: str | None = None, guests: list[str] | None = None,
     ) -> dict:
         """Never blindly retried: a retried write could double-book. Callers that need retry-safety
-        must use the idempotency-key + BookingAttempt reconciliation flow in agent/orchestrator.py,
+        must use the idempotency-key + BookingAttempt flow in agent/booking_flow.py,
         not a second call to this method for the same slot.
         """
         self._ensure_configured()
